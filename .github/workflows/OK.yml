@@ -101,7 +101,39 @@ jobs:
             echo "FFmpeg failed to create m3u8"
             exit 1
           fi
+      - name: Generate Thumbnail VTT (10s interval)
+        run: |
+          NAME="${{ github.event.inputs.type }}-${{ github.event.inputs.tmdb }}-${{ github.event.inputs.ss }}-${{ github.event.inputs.ep }}"
+          
+          mkdir -p output/thumbs
 
+          # extract thumbnails
+          ffmpeg -y -i input_video.mp4 \
+            -vf "fps=1/10,scale=60:90" \
+            output/thumbs/thumb%04d.jpg
+
+          # tạo file VTT
+          VTT="output/${NAME}.vtt"
+
+          echo "WEBVTT" > $VTT
+          echo "" >> $VTT
+
+          COUNT=$(ls output/thumbs | wc -l)
+
+          i=0
+          for file in output/thumbs/*.jpg; do
+            START=$((i*10))
+            END=$(((i+1)*10))
+
+            printf "%02d:%02d:%02d.000 --> %02d:%02d:%02d.000\n" \
+              $((START/3600)) $(((START%3600)/60)) $((START%60)) \
+              $((END/3600)) $(((END%3600)/60)) $((END%60)) >> $VTT
+
+            echo "thumbs/$(basename $file)" >> $VTT
+            echo "" >> $VTT
+
+            i=$((i+1))
+          done
       - name: Deploy to Cloudflare Pages (first)
         id: deploy1
         uses: cloudflare/pages-action@v1
@@ -110,14 +142,14 @@ jobs:
           accountId: ${{ github.event.inputs.account }}
           projectName: ${{ github.event.inputs.page }}
           directory: ./output
-          branch: ${NAME}
+          branch: NAME="${{ github.event.inputs.type }}-${{ github.event.inputs.tmdb }}-${{ github.event.inputs.ss }}-${{ github.event.inputs.ep }}"
 
       - name: Verify Cloudflare deployment (branch domain check)
         id: verify
         continue-on-error: true
         env:
           PROJECT: ${{ github.event.inputs.page }}
-          BRANCH: ${NAME}
+          BRANCH: NAME="${{ github.event.inputs.type }}-${{ github.event.inputs.tmdb }}-${{ github.event.inputs.ss }}-${{ github.event.inputs.ep }}"
         run: |
           set -e
 
@@ -132,7 +164,7 @@ jobs:
             [ "$code" = "200" ]
           }
 
-          echo "[WAIT] Waiting 5 minutes for Pages propagation..."
+          echo "[WAIT] Waiting 1 minutes for Pages propagation..."
           sleep 60
 
           echo "[CHECK #1]"
@@ -162,4 +194,4 @@ jobs:
           accountId: ${{ github.event.inputs.account }}
           projectName: ${{ github.event.inputs.page }}
           directory: ./output
-          branch: ${NAME}
+          branch: NAME="${{ github.event.inputs.type }}-${{ github.event.inputs.tmdb }}-${{ github.event.inputs.ss }}-${{ github.event.inputs.ep }}"
