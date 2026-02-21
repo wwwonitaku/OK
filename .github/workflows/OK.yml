@@ -1,0 +1,165 @@
+name: OKR to M3U8 and Deploy V2
+
+on:
+  workflow_dispatch:
+    inputs:
+      link:
+        description: 'ID'
+        required: true
+      type:
+        description: 'Type'
+        required: true
+      tmdb:
+        description: 'TMDB'
+        required: true
+      ss:
+        description: 'SS'
+        required: true
+      ep:
+        description: 'Ep'
+        required: true
+      token:
+        description: 'Token'
+        required: true
+      page:
+        description: 'Pages'
+        required: true
+      account:
+        description: 'Account'
+        required: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg aria2 jq
+          python3 -m pip install --upgrade pip
+          pip install --upgrade yt-dlp
+
+      - name: Download Video from OK.ru
+        id: download
+        run: |
+          RAW_URL="${{ github.event.inputs.link }}"
+          # Chuyển ID số thành URL nếu cần
+          if [[ "$RAW_URL" =~ ^[0-9]+$ ]]; then
+            URL="https://ok.ru/video/$RAW_URL"
+          else
+            URL="$RAW_URL"
+          fi
+          
+          echo "Downloading from: $URL"
+          
+          # Tải video chất lượng tốt nhất (ưu tiên 1080p/720p)
+          # Sử dụng aria2 để tăng tốc tải
+          yt-dlp \
+            -f "bv*[height<=1080]+ba/b[height<=1080] / best" \
+            --merge-output-format mp4 \
+            --downloader aria2c \
+            --downloader-args "aria2c:--max-connection-per-server=16 --split=16" \
+            --no-check-certificate \
+            -o "input_video.mp4" \
+            "$URL"
+          
+          # Kiểm tra file tồn tại và size > 0
+          if [ ! -s input_video.mp4 ]; then
+            echo "Download failed or file empty"
+            exit 1
+          fi
+
+      - name: Convert to HLS fMP4 (Segments as PNG)
+        run: |
+          mkdir -p output
+          NAME="${{ github.event.inputs.type }}-${{ github.event.inputs.tmdb }}-${{ github.event.inputs.ss }}-${{ github.event.inputs.ep }}"
+          
+          # Giải thích các tham số FFmpeg:
+          # -map 0:v:0 -map 0:a? : Lấy video đầu tiên, lấy audio nếu có (không lỗi nếu ko có audio)
+          # -c:v copy : Giữ nguyên bitrate/chất lượng video (không encode lại - cực nhanh)
+          # -hls_fmp4_init_filename : Đặt tên file init (quan trọng nhất của fMP4) thành .png
+          # -hls_segment_filename : Đặt tên các mảnh segment thành .png
+          
+          ffmpeg -i input_video.mp4 \
+            -map 0:v:0 -map 0:a? \
+            -c:v copy \
+            -c:a aac -b:a 96k \
+            -f hls \
+            -start_number 10001 \
+            -hls_time 6 \
+            -hls_list_size 0 \
+            -hls_segment_type fmp4 \
+            -hls_fmp4_init_filename "${NAME}-index.png" \
+            -hls_segment_filename "output/${NAME}-index%d.png" \
+            "output/${NAME}.m3u8"
+          
+          # Kiểm tra xem file m3u8 có được tạo không
+          if [ ! -f "output/${NAME}.m3u8" ]; then
+            echo "FFmpeg failed to create m3u8"
+            exit 1
+          fi
+
+      - name: Deploy to Cloudflare Pages (first)
+        id: deploy1
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ github.event.inputs.token }}
+          accountId: ${{ github.event.inputs.account }}
+          projectName: ${{ github.event.inputs.page }}
+          directory: ./output
+          branch: ${NAME}
+
+      - name: Verify Cloudflare deployment (branch domain check)
+        id: verify
+        continue-on-error: true
+        env:
+          PROJECT: ${{ github.event.inputs.page }}
+          BRANCH: ${NAME}
+        run: |
+          set -e
+
+          BASE_URL="https://${BRANCH}.${PROJECT}.pages.dev"
+          FILE_URL="${BASE_URL}/${BRANCH}.m3u8"
+
+          echo "[TARGET] $FILE_URL"
+
+          check () {
+            code=$(curl -L -o /dev/null -s -w "%{http_code}" "$FILE_URL")
+            echo "HTTP CODE: $code"
+            [ "$code" = "200" ]
+          }
+
+          echo "[WAIT] Waiting 5 minutes for Pages propagation..."
+          sleep 60
+
+          echo "[CHECK #1]"
+          if check; then
+            echo "[SUCCESS] File exists"
+            exit 0
+          fi
+
+          echo "[WAIT] Still not found, wait extra 3 minutes..."
+          sleep 180
+
+          echo "[CHECK #2]"
+          if check; then
+            echo "[SUCCESS] File exists after delay"
+            exit 0
+          fi
+
+          echo "[FAIL] File still missing → mark for redeploy"
+          echo "NEED_REDEPLOY=true" >> $GITHUB_ENV
+          exit 1
+
+      - name: Deploy to Cloudflare Pages (retry – reuse encoded files)
+        if: env.NEED_REDEPLOY == 'true'
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ github.event.inputs.token }}
+          accountId: ${{ github.event.inputs.account }}
+          projectName: ${{ github.event.inputs.page }}
+          directory: ./output
+          branch: ${NAME}
