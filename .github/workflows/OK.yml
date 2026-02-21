@@ -1,4 +1,4 @@
-name: OKR to M3U8 and Deploy V2
+name: OKR to M3U8
 
 on:
   workflow_dispatch:
