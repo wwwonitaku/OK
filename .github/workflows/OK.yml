@@ -142,14 +142,14 @@ jobs:
           accountId: ${{ github.event.inputs.account }}
           projectName: ${{ github.event.inputs.page }}
           directory: ./output
-          branch: NAME="${{ github.event.inputs.type }}-${{ github.event.inputs.tmdb }}-${{ github.event.inputs.ss }}-${{ github.event.inputs.ep }}"
+          branch: "${{ github.event.inputs.type }}-${{ github.event.inputs.tmdb }}-${{ github.event.inputs.ss }}-${{ github.event.inputs.ep }}"
 
       - name: Verify Cloudflare deployment (branch domain check)
         id: verify
         continue-on-error: true
         env:
           PROJECT: ${{ github.event.inputs.page }}
-          BRANCH: NAME="${{ github.event.inputs.type }}-${{ github.event.inputs.tmdb }}-${{ github.event.inputs.ss }}-${{ github.event.inputs.ep }}"
+          BRANCH: "${{ github.event.inputs.type }}-${{ github.event.inputs.tmdb }}-${{ github.event.inputs.ss }}-${{ github.event.inputs.ep }}"
         run: |
           set -e
 
@@ -194,4 +194,4 @@ jobs:
           accountId: ${{ github.event.inputs.account }}
           projectName: ${{ github.event.inputs.page }}
           directory: ./output
-          branch: NAME="${{ github.event.inputs.type }}-${{ github.event.inputs.tmdb }}-${{ github.event.inputs.ss }}-${{ github.event.inputs.ep }}"
+          branch: "${{ github.event.inputs.type }}-${{ github.event.inputs.tmdb }}-${{ github.event.inputs.ss }}-${{ github.event.inputs.ep }}"
