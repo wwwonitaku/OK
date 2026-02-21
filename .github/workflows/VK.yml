@@ -1,0 +1,190 @@
+name: VKVideo to M3U8
+
+on:
+  workflow_dispatch:
+    inputs:
+      link:
+        description: 'VK ID (example: 230153488_456239134)'
+        required: true
+      type:
+        description: 'Type'
+        required: true
+      tmdb:
+        description: 'TMDB'
+        required: true
+      ss:
+        description: 'SS'
+        required: true
+      ep:
+        description: 'Ep'
+        required: true
+      token:
+        description: 'Token'
+        required: true
+      page:
+        description: 'Pages'
+        required: true
+      account:
+        description: 'Account'
+        required: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      NAME: ${{ github.event.inputs.type }}-${{ github.event.inputs.tmdb }}-${{ github.event.inputs.ss }}-${{ github.event.inputs.ep }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg aria2 jq
+          python3 -m pip install --upgrade pip
+          pip install --upgrade yt-dlp
+
+      ############################################################
+      # DOWNLOAD VKVIDEO
+      ############################################################
+      - name: Download Video from VKVideo
+        run: |
+          RAW_ID="${{ github.event.inputs.link }}"
+
+          URL="https://vkvideo.ru/video-${RAW_ID}"
+
+          echo "Downloading from: $URL"
+
+          yt-dlp \
+            -f "bestvideo[height<=1080]+bestaudio/best[height<=1080]" \
+            --merge-output-format mp4 \
+            --downloader aria2c \
+            --downloader-args "aria2c:--max-connection-per-server=16 --split=16" \
+            -o "input_video.mp4" \
+            "$URL"
+
+          if [ ! -s input_video.mp4 ]; then
+            echo "Download failed"
+            exit 1
+          fi
+
+      ############################################################
+      # CONVERT HLS fMP4
+      ############################################################
+      - name: Convert to HLS fMP4 (Segments as PNG)
+        run: |
+          mkdir -p output
+
+          ffmpeg -y -i input_video.mp4 \
+            -map 0:v:0 -map 0:a? \
+            -c:v copy \
+            -c:a aac -b:a 96k \
+            -f hls \
+            -start_number 10001 \
+            -hls_time 6 \
+            -hls_list_size 0 \
+            -hls_segment_type fmp4 \
+            -hls_fmp4_init_filename "${NAME}-index.png" \
+            -hls_segment_filename "output/${NAME}-index%d.png" \
+            "output/${NAME}.m3u8"
+
+          if [ ! -f "output/${NAME}.m3u8" ]; then
+            echo "FFmpeg failed"
+            exit 1
+          fi
+
+      ############################################################
+      # THUMBNAIL VTT
+      ############################################################
+      - name: Generate Thumbnail VTT (10s interval)
+        run: |
+          mkdir -p output/thumbs
+
+          ffmpeg -y -i input_video.mp4 \
+            -vf "fps=1/10,scale=60:90" \
+            output/thumbs/thumb%04d.jpg
+
+          VTT="output/${NAME}.vtt"
+
+          echo "WEBVTT" > $VTT
+          echo "" >> $VTT
+
+          i=0
+          for file in output/thumbs/*.jpg; do
+            START=$((i*10))
+            END=$(((i+1)*10))
+
+            printf "%02d:%02d:%02d.000 --> %02d:%02d:%02d.000\n" \
+              $((START/3600)) $(((START%3600)/60)) $((START%60)) \
+              $((END/3600)) $(((END%3600)/60)) $((END%60)) >> $VTT
+
+            echo "thumbs/$(basename $file)" >> $VTT
+            echo "" >> $VTT
+
+            i=$((i+1))
+          done
+
+      ############################################################
+      # DEPLOY CLOUDFLARE
+      ############################################################
+      - name: Deploy to Cloudflare Pages (first)
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ github.event.inputs.token }}
+          accountId: ${{ github.event.inputs.account }}
+          projectName: ${{ github.event.inputs.page }}
+          directory: ./output
+          branch: ${{ env.NAME }}
+
+      ############################################################
+      # VERIFY DEPLOY
+      ############################################################
+      - name: Verify Cloudflare deployment
+        id: verify
+        continue-on-error: true
+        env:
+          PROJECT: ${{ github.event.inputs.page }}
+          BRANCH: ${{ env.NAME }}
+        run: |
+          set -e
+
+          BASE_URL="https://${BRANCH}.${PROJECT}.pages.dev"
+          FILE_URL="${BASE_URL}/${BRANCH}.m3u8"
+
+          echo "Checking: $FILE_URL"
+
+          check () {
+            code=$(curl -L -o /dev/null -s -w "%{http_code}" "$FILE_URL")
+            echo "HTTP: $code"
+            [ "$code" = "200" ]
+          }
+
+          sleep 60
+
+          if check; then
+            exit 0
+          fi
+
+          sleep 180
+
+          if check; then
+            exit 0
+          fi
+
+          echo "NEED_REDEPLOY=true" >> $GITHUB_ENV
+          exit 1
+
+      ############################################################
+      # RETRY DEPLOY
+      ############################################################
+      - name: Deploy retry
+        if: env.NEED_REDEPLOY == 'true'
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ github.event.inputs.token }}
+          accountId: ${{ github.event.inputs.account }}
+          projectName: ${{ github.event.inputs.page }}
+          directory: ./output
+          branch: ${{ env.NAME }}
