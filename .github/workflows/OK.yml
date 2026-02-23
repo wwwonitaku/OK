@@ -121,7 +121,7 @@ jobs:
       
           # 4️⃣ Generate VTT
           VTT="output/${{ github.event.inputs.slug }}.vtt"
-          SPRITE="sprite.jpg"
+          SPRITE="${{ github.event.inputs.slug }}.jpg"
       
           echo "WEBVTT" > $VTT
           echo "" >> $VTT
