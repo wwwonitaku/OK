@@ -91,37 +91,65 @@ jobs:
             echo "FFmpeg failed to create m3u8"
             exit 1
           fi
-      - name: Generate Thumbnail VTT (30s interval)
+      - name: Generate Thumbnail Sprite + VTT (30s interval)
         run: |
           mkdir -p output/thumbs
-
-          # extract thumbnails
+      
+          # 1️⃣ Extract thumbnails
           ffmpeg -y -i input_video.mp4 \
-            -vf "fps=1/30,scale=90:-1" \
+            -vf "fps=1/30,scale=160:-1" \
             output/thumbs/thumb%04d.jpg
-
-          # tạo file VTT
+      
+          # 2️⃣ Count thumbnails
+          COUNT=$(ls output/thumbs/*.jpg | wc -l)
+      
+          COLUMNS=10
+          THUMB_WIDTH=160
+      
+          # Get real thumbnail height
+          THUMB_HEIGHT=$(ffprobe -v error -select_streams v:0 \
+            -show_entries stream=height \
+            -of csv=p=0 output/thumbs/thumb0001.jpg)
+      
+          ROWS=$(( (COUNT + COLUMNS - 1) / COLUMNS ))
+      
+          # 3️⃣ Generate sprite
+          ffmpeg -y \
+            -pattern_type glob -i "output/thumbs/*.jpg" \
+            -filter_complex "tile=${COLUMNS}x${ROWS}" \
+            output/sprite.jpg
+      
+          # 4️⃣ Generate VTT
           VTT="output/${{ github.event.inputs.slug }}.vtt"
-
+          SPRITE="sprite.jpg"
+      
           echo "WEBVTT" > $VTT
           echo "" >> $VTT
-
-          COUNT=$(ls output/thumbs | wc -l)
-
+      
           i=0
           for file in output/thumbs/*.jpg; do
             START=$((i*30))
             END=$(((i+1)*30))
-
+      
+            COL=$((i % COLUMNS))
+            ROW=$((i / COLUMNS))
+      
+            X=$((COL * THUMB_WIDTH))
+            Y=$((ROW * THUMB_HEIGHT))
+      
             printf "%02d:%02d:%02d.000 --> %02d:%02d:%02d.000\n" \
               $((START/3600)) $(((START%3600)/60)) $((START%60)) \
               $((END/3600)) $(((END%3600)/60)) $((END%60)) >> $VTT
-
-            echo "thumbs/$(basename $file)" >> $VTT
+      
+            echo "${SPRITE}#xywh=${X},${Y},${THUMB_WIDTH},${THUMB_HEIGHT}" >> $VTT
             echo "" >> $VTT
-
+      
             i=$((i+1))
           done
+      
+          # 5️⃣ Xóa folder thumbs trước khi deploy
+          rm -rf output/thumbs
+          
       - name: Deploy to Cloudflare Pages (first)
         id: deploy1
         uses: cloudflare/pages-action@v1
