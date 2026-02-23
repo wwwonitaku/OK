@@ -117,7 +117,7 @@ jobs:
           ffmpeg -y \
             -pattern_type glob -i "output/thumbs/*.jpg" \
             -filter_complex "tile=${COLUMNS}x${ROWS}" \
-            output/sprite.jpg
+            output/${{ github.event.inputs.slug }}.jpg
       
           # 4️⃣ Generate VTT
           VTT="output/${{ github.event.inputs.slug }}.vtt"
