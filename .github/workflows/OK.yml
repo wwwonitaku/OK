@@ -101,7 +101,7 @@ jobs:
             echo "FFmpeg failed to create m3u8"
             exit 1
           fi
-      - name: Generate Thumbnail VTT (10s interval)
+      - name: Generate Thumbnail VTT (30s interval)
         run: |
           NAME="${{ github.event.inputs.type }}-${{ github.event.inputs.tmdb }}-${{ github.event.inputs.ss }}-${{ github.event.inputs.ep }}"
           
@@ -109,7 +109,7 @@ jobs:
 
           # extract thumbnails
           ffmpeg -y -i input_video.mp4 \
-            -vf "fps=1/10,scale=60:90" \
+            -vf "fps=1/30,scale=90:-1" \
             output/thumbs/thumb%04d.jpg
 
           # tạo file VTT
@@ -122,8 +122,8 @@ jobs:
 
           i=0
           for file in output/thumbs/*.jpg; do
-            START=$((i*10))
-            END=$(((i+1)*10))
+            START=$((i*30))
+            END=$(((i+1)*30))
 
             printf "%02d:%02d:%02d.000 --> %02d:%02d:%02d.000\n" \
               $((START/3600)) $(((START%3600)/60)) $((START%60)) \
