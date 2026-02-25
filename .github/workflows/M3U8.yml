@@ -50,15 +50,11 @@ jobs:
             yt-dlp \
               "$URL" \
               --concurrent-fragments 1 \
-              --sleep-fragments 2 \
-              --sleep-requests 1 \
-              --fragment-retries 10 \
-              --retry-sleep 30 \
-              --retries infinite \
-              --file-access-retries 5 \
-              --buffer-size 16K \
-              --force-overwrites \
+              --sleep-requests 3 \
+              --fragment-retries 5 \
+              --retry-sleep 10 \
               --hls-use-mpegts \
+              --force-overwrites \
               -o input_video.mp4
       
             # Kiểm tra nếu file tồn tại và dung lượng lớn hơn 5MB (coi như thành công một phần hoặc toàn bộ)
