@@ -114,7 +114,7 @@ jobs:
       
           # 1️⃣ Extract thumbnails
           ffmpeg -y -i input_video.mp4 \
-            -vf "fps=1/30,scale=160:-1" \
+            -vf "fps=1/30,scale=320:-1" \
             output/thumbs/thumb%04d.jpg
       
           # 2️⃣ Count thumbnails
