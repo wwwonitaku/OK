@@ -32,55 +32,57 @@ jobs:
           sudo apt-get install -y ffmpeg aria2 jq
           python3 -m pip install --upgrade pip
           pip install --upgrade yt-dlp
+          
+      ############################################################
+      # DOWNLOAD M3U8 (Retry + Force full download)
+      ############################################################
+      - name: Download Video from m3u8 Link
+        run: |
+          URL="${{ github.event.inputs.link }}"
+      
+          echo "Downloading m3u8 from: $URL"
+      
+          MAX_RETRY=10
+          COUNT=0
+      
+          rm -f input_video.mp4
+      
+          until [ $COUNT -ge $MAX_RETRY ]
+          do
+            echo "Attempt: $((COUNT+1))"
+      
+            ffmpeg -y \
+              -loglevel error \
+              -user_agent "Mozilla/5.0" \
+              -fflags +genpts \
+              -reconnect 1 \
+              -reconnect_streamed 1 \
+              -reconnect_delay_max 30 \
+              -i "$URL" \
+              -map 0:v:0 -map 0:a? \
+              -c copy \
+              -bsf:a aac_adtstoasc \
+              -xerror \
+              input_video.mp4
+      
+            if [ -s input_video.mp4 ]; then
+              echo "Download success"
+              break
+            fi
+      
+            COUNT=$((COUNT+1))
+      
+            echo "Download incomplete or failed"
+            echo "Wait 60s then retry..."
+            sleep 60
+          done
+      
+          if [ ! -s input_video.mp4 ]; then
+            echo "Download failed after $MAX_RETRY attempts"
+            exit 1
+          fi
 
-          ############################################################
-          # DOWNLOAD M3U8 (Retry + Force full download)
-          ############################################################
-          - name: Download Video from m3u8 Link
-            run: |
-              URL="${{ github.event.inputs.link }}"
-          
-              echo "Downloading m3u8 from: $URL"
-          
-              MAX_RETRY=10
-              COUNT=0
-          
-              rm -f input_video.mp4
-          
-              until [ $COUNT -ge $MAX_RETRY ]
-              do
-                echo "Attempt: $((COUNT+1))"
-          
-                ffmpeg -y \
-                  -loglevel error \
-                  -user_agent "Mozilla/5.0" \
-                  -fflags +genpts \
-                  -reconnect 1 \
-                  -reconnect_streamed 1 \
-                  -reconnect_delay_max 30 \
-                  -i "$URL" \
-                  -map 0:v:0 -map 0:a? \
-                  -c copy \
-                  -bsf:a aac_adtstoasc \
-                  -xerror \
-                  input_video.mp4
-          
-                if [ -s input_video.mp4 ]; then
-                  echo "Download success"
-                  break
-                fi
-          
-                COUNT=$((COUNT+1))
-          
-                echo "Download incomplete or failed"
-                echo "Wait 60s then retry..."
-                sleep 60
-              done
-          
-              if [ ! -s input_video.mp4 ]; then
-                echo "Download failed after $MAX_RETRY attempts"
-                exit 1
-              fi
+                  
       - name: Convert to HLS fMP4 (Segments as PNG)
         run: |
           mkdir -p output
