@@ -33,53 +33,51 @@ jobs:
           python3 -m pip install --upgrade pip
           pip install --upgrade yt-dlp
           
-      - name: Download Video from m3u8 Link (Stable Mode)
+############################################################
+      # DOWNLOAD M3U8 (ANTI-429 + CLEAN LOG)
+      ############################################################
+      - name: Download Video from m3u8 Link (Clean Log)
         run: |
           URL="${{ github.event.inputs.link }}"
-          echo "Downloading m3u8 from: $URL"
+          echo "Starting download..."
       
-          MAX_RETRY=20
+          MAX_RETRY=50
           COUNT=0
       
           until [ $COUNT -ge $MAX_RETRY ]
           do
-            echo "Attempt: $((COUNT+1))"
+            COUNT=$((COUNT+1))
+            echo "::notice ::Attempt $COUNT/50 - Downloading..."
       
-            # SỬ DỤNG YT-DLP VỚI CHẾ ĐỘ CHẬM CHẮC (TRÁNH 429)
-            # Không dùng aria2c ở đây vì aria2c quá hung hãn khó kiểm soát sleep giữa các fragment
+            # --quiet: Ẩn bớt các log thông tin mở segment
+            # --no-warnings: Ẩn các cảnh báo 429 (để mình tự handle cho gọn)
+            # --progress-template: Chỉ hiển thị 1 dòng tiến trình gọn gàng
+            # --newline: Giúp GitHub ghi log theo từng mốc tiến độ, tránh spam hàng triệu ký tự \r
+            
             yt-dlp \
               "$URL" \
+              --quiet --no-warnings \
+              --progress \
+              --progress-template " [download] %(progress._percent_str)s | Speed: %(progress._speed_str)s | ETA: %(progress._eta_str)s" \
               --concurrent-fragments 1 \
-              --sleep-requests 3 \
-              --fragment-retries 5 \
+              --sleep-requests 2 \
+              --fragment-retries 1 \
               --retry-sleep 60 \
               --hls-use-mpegts \
               --force-overwrites \
-              -o input_video.mp4
+              -o input_video.mp4 && break
       
-            # Kiểm tra nếu file tồn tại và dung lượng lớn hơn 5MB (coi như thành công một phần hoặc toàn bộ)
-            if [ -s input_video.mp4 ]; then
-              SIZE=$(stat -c%s input_video.mp4)
-              echo "Current file size: $SIZE"
-              
-              # Nếu file đã tải xong hoặc rất lớn, có thể thoát loop
-              # Lưu ý: Với m3u8, yt-dlp sẽ tự resume nếu chạy lại cùng một file output
-              if [ "$SIZE" -gt 10000000 ]; then # Ví dụ trên 10MB
-                echo "Download finished or partially success, checking integrity..."
-                # Bạn có thể thêm lệnh check ffmpeg ở đây nếu muốn
-                break
-              fi
-            fi
-      
-            COUNT=$((COUNT+1))
-            echo "HTTP 429 or Connection Error detected. Sleeping 60s before retry..."
+            # Nếu chạy đến đây tức là yt-dlp bị lỗi (thường là 429)
+            echo ""
+            echo "::warning ::Limit detected (429). Waiting 60s to resume..."
             sleep 60
           done
       
           if [ ! -s input_video.mp4 ]; then
-            echo "Download failed after $MAX_RETRY attempts"
+            echo "Error: Download failed after $MAX_RETRY attempts"
             exit 1
           fi
+          echo "Download successful!"
                   
       - name: Convert to HLS fMP4 (Segments as PNG)
         run: |
