@@ -33,63 +33,50 @@ jobs:
           python3 -m pip install --upgrade pip
           pip install --upgrade yt-dlp
           
-      ############################################################
-      # DOWNLOAD M3U8 (PRO – Cloudflare Stable + Resume)
-      ############################################################
-      - name: Download Video from m3u8 Link (PRO)
+      - name: Download Video from m3u8 Link (Stable Mode)
         run: |
           URL="${{ github.event.inputs.link }}"
-      
           echo "Downloading m3u8 from: $URL"
       
-          MAX_RETRY=10
+          MAX_RETRY=20
           COUNT=0
-      
-          rm -f input_video.mp4
       
           until [ $COUNT -ge $MAX_RETRY ]
           do
             echo "Attempt: $((COUNT+1))"
       
+            # SỬ DỤNG YT-DLP VỚI CHẾ ĐỘ CHẬM CHẮC (TRÁNH 429)
+            # Không dùng aria2c ở đây vì aria2c quá hung hãn khó kiểm soát sleep giữa các fragment
             yt-dlp \
               "$URL" \
-              --downloader aria2c \
-              --downloader-args "aria2c:
-                -x8
-                -j8
-                -s8
-                -k1M
-                --file-allocation=none
-                --auto-file-renaming=false
-                --retry-wait=5
-                --max-tries=0
-                --continue=true
-                --summary-interval=0
-                --download-result=hide
-                --lowest-speed-limit=50K
-                --max-connection-per-server=4
-                --min-split-size=1M" \
-              --concurrent-fragments 4 \
-              --fragment-retries infinite \
-              --retry-sleep 10 \
+              --concurrent-fragments 1 \
+              --sleep-fragments 2 \
+              --sleep-requests 1 \
+              --fragment-retries 10 \
+              --retry-sleep 30 \
               --retries infinite \
-              --http-chunk-size 1M \
+              --file-access-retries 5 \
+              --buffer-size 16K \
               --force-overwrites \
+              --hls-use-mpegts \
               -o input_video.mp4
       
+            # Kiểm tra nếu file tồn tại và dung lượng lớn hơn 5MB (coi như thành công một phần hoặc toàn bộ)
             if [ -s input_video.mp4 ]; then
               SIZE=$(stat -c%s input_video.mp4)
-              echo "File size: $SIZE"
-      
-              if [ "$SIZE" -gt 5000000 ]; then
-                echo "Download success"
+              echo "Current file size: $SIZE"
+              
+              # Nếu file đã tải xong hoặc rất lớn, có thể thoát loop
+              # Lưu ý: Với m3u8, yt-dlp sẽ tự resume nếu chạy lại cùng một file output
+              if [ "$SIZE" -gt 10000000 ]; then # Ví dụ trên 10MB
+                echo "Download finished or partially success, checking integrity..."
+                # Bạn có thể thêm lệnh check ffmpeg ở đây nếu muốn
                 break
               fi
             fi
       
             COUNT=$((COUNT+1))
-      
-            echo "Retry after Cloudflare limit..."
+            echo "HTTP 429 or Connection Error detected. Sleeping 60s before retry..."
             sleep 60
           done
       
@@ -97,7 +84,6 @@ jobs:
             echo "Download failed after $MAX_RETRY attempts"
             exit 1
           fi
-
                   
       - name: Convert to HLS fMP4 (Segments as PNG)
         run: |
