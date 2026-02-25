@@ -63,7 +63,6 @@ jobs:
               --concurrent-fragments 1 \
               --sleep-requests 3 \
               --fragment-retries 1 \
-              --retry-sleep 60 \
               --hls-use-mpegts \
               --force-overwrites \
               -o input_video.mp4 && break
@@ -71,7 +70,7 @@ jobs:
             # Nếu chạy đến đây tức là yt-dlp bị lỗi (thường là 429)
             echo ""
             echo "::warning ::Limit detected (429). Waiting 60s to resume..."
-            sleep 60
+            sleep 120
           done
       
           if [ ! -s input_video.mp4 ]; then
