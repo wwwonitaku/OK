@@ -40,7 +40,7 @@ jobs:
         run: |
           RAW_ID="${{ github.event.inputs.link }}"
 
-          URL="https://vkvideo.ru/video-${RAW_ID}"
+          URL="https://vkvideo.ru/${RAW_ID}"
 
           echo "Downloading from: $URL"
 
