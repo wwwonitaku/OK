@@ -95,7 +95,7 @@ jobs:
             -c:a aac -b:a 96k \
             -f hls \
             -start_number 10001 \
-            -hls_time 6 \
+            -hls_time 5 \
             -hls_list_size 0 \
             -hls_segment_type fmp4 \
             -hls_fmp4_init_filename "${{ github.event.inputs.slug }}-index.png" \
