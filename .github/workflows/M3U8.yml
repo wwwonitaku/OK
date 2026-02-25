@@ -51,7 +51,7 @@ jobs:
               "$URL" \
               --quiet --progress --progress-delta 15 \
               --concurrent-fragments 1 \
-              --sleep-requests 15 \
+              --sleep-requests 1 \
               --limit-rate 1M \
               --fragment-retries 0 \
               --abort-on-unavailable-fragment \
