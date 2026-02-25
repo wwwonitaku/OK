@@ -1,4 +1,4 @@
-name: VK to M3U8
+name: M3U8 Download
 
 on:
   workflow_dispatch:
