@@ -1,0 +1,221 @@
+name: VK to M3U8
+
+on:
+  workflow_dispatch:
+    inputs:
+      link:
+        description: 'Link'
+        required: true
+      slug:
+        description: 'Slug'
+        required: true
+      token:
+        description: 'Token'
+        required: true
+      page:
+        description: 'Pages'
+        required: true
+      account:
+        description: 'Account'
+        required: true
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg aria2 jq
+          python3 -m pip install --upgrade pip
+          pip install --upgrade yt-dlp
+
+      ############################################################
+      # DOWNLOAD M3U8 (Retry when error / HTTP 429)
+      ############################################################
+      - name: Download Video from m3u8 Link
+        run: |
+          URL="${{ github.event.inputs.link }}"
+      
+          echo "Downloading m3u8 from: $URL"
+      
+          MAX_RETRY=10
+          COUNT=0
+      
+          until [ $COUNT -ge $MAX_RETRY ]
+          do
+            echo "Attempt: $((COUNT+1))"
+      
+            ffmpeg -y \
+              -loglevel error \
+              -i "$URL" \
+              -map 0:v:0 -map 0:a? \
+              -c copy \
+              -bsf:a aac_adtstoasc \
+              input_video.mp4
+      
+            if [ -s input_video.mp4 ]; then
+              echo "Download success"
+              break
+            fi
+      
+            COUNT=$((COUNT+1))
+      
+            echo "Download failed (possible 429 or network error)"
+            echo "Wait 60s then retry..."
+            sleep 60
+          done
+      
+          if [ ! -s input_video.mp4 ]; then
+            echo "Download failed after $MAX_RETRY attempts"
+            exit 1
+          fi
+      - name: Convert to HLS fMP4 (Segments as PNG)
+        run: |
+          mkdir -p output
+          
+          # Giải thích các tham số FFmpeg:
+          # -map 0:v:0 -map 0:a? : Lấy video đầu tiên, lấy audio nếu có (không lỗi nếu ko có audio)
+          # -c:v copy : Giữ nguyên bitrate/chất lượng video (không encode lại - cực nhanh)
+          # -hls_fmp4_init_filename : Đặt tên file init (quan trọng nhất của fMP4) thành .png
+          # -hls_segment_filename : Đặt tên các mảnh segment thành .png
+          
+          ffmpeg -i input_video.mp4 \
+            -map 0:v:0 -map 0:a? \
+            -c:v copy \
+            -c:a aac -b:a 96k \
+            -f hls \
+            -start_number 10001 \
+            -hls_time 6 \
+            -hls_list_size 0 \
+            -hls_segment_type fmp4 \
+            -hls_fmp4_init_filename "${{ github.event.inputs.slug }}-index.png" \
+            -hls_segment_filename "output/${{ github.event.inputs.slug }}-index%d.png" \
+            "output/${{ github.event.inputs.slug }}.m3u8"
+          
+          # Kiểm tra xem file m3u8 có được tạo không
+          if [ ! -f "output/${{ github.event.inputs.slug }}.m3u8" ]; then
+            echo "FFmpeg failed to create m3u8"
+            exit 1
+          fi
+      - name: Generate Thumbnail Sprite + VTT (30s interval)
+        run: |
+          mkdir -p output/thumbs
+      
+          # 1️⃣ Extract thumbnails
+          ffmpeg -y -i input_video.mp4 \
+            -vf "fps=1/30,scale=160:-1" \
+            output/thumbs/thumb%04d.jpg
+      
+          # 2️⃣ Count thumbnails
+          COUNT=$(ls output/thumbs/*.jpg | wc -l)
+      
+          COLUMNS=10
+          THUMB_WIDTH=160
+      
+          # Get real thumbnail height
+          THUMB_HEIGHT=$(ffprobe -v error -select_streams v:0 \
+            -show_entries stream=height \
+            -of csv=p=0 output/thumbs/thumb0001.jpg)
+      
+          ROWS=$(( (COUNT + COLUMNS - 1) / COLUMNS ))
+      
+          # 3️⃣ Generate sprite
+          ffmpeg -y \
+            -pattern_type glob -i "output/thumbs/*.jpg" \
+            -filter_complex "tile=${COLUMNS}x${ROWS}" \
+            "output/${{ github.event.inputs.slug }}.jpg"
+      
+          # 4️⃣ Generate VTT
+          VTT="output/${{ github.event.inputs.slug }}.vtt"
+          SPRITE="${{ github.event.inputs.slug }}.jpg"
+      
+          echo "WEBVTT" > $VTT
+          echo "" >> $VTT
+      
+          i=0
+          for file in output/thumbs/*.jpg; do
+            START=$((i*30))
+            END=$(((i+1)*30))
+      
+            COL=$((i % COLUMNS))
+            ROW=$((i / COLUMNS))
+      
+            X=$((COL * THUMB_WIDTH))
+            Y=$((ROW * THUMB_HEIGHT))
+      
+            printf "%02d:%02d:%02d.000 --> %02d:%02d:%02d.000\n" \
+              $((START/3600)) $(((START%3600)/60)) $((START%60)) \
+              $((END/3600)) $(((END%3600)/60)) $((END%60)) >> $VTT
+      
+            echo "${SPRITE}#xywh=${X},${Y},${THUMB_WIDTH},${THUMB_HEIGHT}" >> $VTT
+            echo "" >> $VTT
+      
+            i=$((i+1))
+          done
+      
+          # 5️⃣ Xóa folder thumbs trước khi deploy
+          rm -rf output/thumbs
+          
+      - name: Deploy to Cloudflare Pages (first)
+        id: deploy1
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ github.event.inputs.token }}
+          accountId: ${{ github.event.inputs.account }}
+          projectName: ${{ github.event.inputs.page }}
+          directory: ./output
+          branch: ${{ github.event.inputs.slug }}
+
+      - name: Verify Cloudflare deployment (branch domain check)
+        id: verify
+        continue-on-error: true
+        env:
+          PROJECT: ${{ github.event.inputs.page }}
+          BRANCH: ${{ github.event.inputs.slug }}
+        run: |
+          set -e
+          FILE_URL="https://${{ github.event.inputs.slug }}.${{ github.event.inputs.page }}.pages.dev/${{ github.event.inputs.slug }}.m3u8"
+
+          echo "[TARGET] $FILE_URL"
+
+          check () {
+            code=$(curl -L -o /dev/null -s -w "%{http_code}" "$FILE_URL")
+            echo "HTTP CODE: $code"
+            [ "$code" = "200" ]
+          }
+
+          echo "[WAIT] Waiting 1 minutes for Pages propagation..."
+          sleep 60
+
+          echo "[CHECK #1]"
+          if check; then
+            echo "[SUCCESS] File exists"
+            exit 0
+          fi
+
+          echo "[WAIT] Still not found, wait extra 3 minutes..."
+          sleep 180
+
+          echo "[CHECK #2]"
+          if check; then
+            echo "[SUCCESS] File exists after delay"
+            exit 0
+          fi
+
+          echo "[FAIL] File still missing → mark for redeploy"
+          echo "NEED_REDEPLOY=true" >> $GITHUB_ENV
+          exit 1
+
+      - name: Deploy to Cloudflare Pages (retry – reuse encoded files)
+        if: env.NEED_REDEPLOY == 'true'
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ github.event.inputs.token }}
+          accountId: ${{ github.event.inputs.account }}
+          projectName: ${{ github.event.inputs.page }}
+          directory: ./output
+          branch: ${{ github.event.inputs.slug }}
