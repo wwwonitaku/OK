@@ -61,7 +61,7 @@ jobs:
               --progress-delta 30
               --progress-template " [download] %(progress._percent_str)s | Speed: %(progress._speed_str)s | ETA: %(progress._eta_str)s" \
               --concurrent-fragments 1 \
-              --sleep-requests 1 \
+              --sleep-requests 10 \
               --fragment-retries 1 \
               --hls-use-mpegts \
               --force-overwrites \
