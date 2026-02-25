@@ -34,9 +34,9 @@ jobs:
           pip install --upgrade yt-dlp
           
       ############################################################
-      # DOWNLOAD M3U8 (Retry + Force full download)
+      # DOWNLOAD M3U8 (PRO – Cloudflare Stable + Resume)
       ############################################################
-      - name: Download Video from m3u8 Link
+      - name: Download Video from m3u8 Link (PRO)
         run: |
           URL="${{ github.event.inputs.link }}"
       
@@ -51,29 +51,45 @@ jobs:
           do
             echo "Attempt: $((COUNT+1))"
       
-            ffmpeg -y \
-              -loglevel error \
-              -user_agent "Mozilla/5.0" \
-              -fflags +genpts \
-              -reconnect 1 \
-              -reconnect_streamed 1 \
-              -reconnect_delay_max 30 \
-              -i "$URL" \
-              -map 0:v:0 -map 0:a? \
-              -c copy \
-              -bsf:a aac_adtstoasc \
-              -xerror \
-              input_video.mp4
+            yt-dlp \
+              "$URL" \
+              --downloader aria2c \
+              --downloader-args "aria2c:
+                -x8
+                -j8
+                -s8
+                -k1M
+                --file-allocation=none
+                --auto-file-renaming=false
+                --retry-wait=5
+                --max-tries=0
+                --continue=true
+                --summary-interval=0
+                --download-result=hide
+                --lowest-speed-limit=50K
+                --max-connection-per-server=4
+                --min-split-size=1M" \
+              --concurrent-fragments 4 \
+              --fragment-retries infinite \
+              --retry-sleep 10 \
+              --retries infinite \
+              --http-chunk-size 1M \
+              --force-overwrites \
+              -o input_video.mp4
       
             if [ -s input_video.mp4 ]; then
-              echo "Download success"
-              break
+              SIZE=$(stat -c%s input_video.mp4)
+              echo "File size: $SIZE"
+      
+              if [ "$SIZE" -gt 5000000 ]; then
+                echo "Download success"
+                break
+              fi
             fi
       
             COUNT=$((COUNT+1))
       
-            echo "Download incomplete or failed"
-            echo "Wait 60s then retry..."
+            echo "Retry after Cloudflare limit..."
             sleep 60
           done
       
