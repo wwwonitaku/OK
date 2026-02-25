@@ -33,12 +33,11 @@ jobs:
           python3 -m pip install --upgrade pip
           pip install --upgrade yt-dlp
           
-      - name: Download Video from m3u8 Link (Final Fix)
+      - name: Download Video from m3u8 Link (Stable Resume)
         run: |
           URL="${{ github.event.inputs.link }}"
           
-          # Tăng giới hạn retry và thời gian nghỉ
-          MAX_RETRY=5
+          MAX_RETRY=100
           COUNT=0
       
           until [ $COUNT -ge $MAX_RETRY ]
@@ -46,31 +45,35 @@ jobs:
             COUNT=$((COUNT+1))
             echo "::notice ::Attempt $COUNT/$MAX_RETRY - Downloading..."
       
-            # CẤU HÌNH YT-DLP CỰC MẠNH ĐỂ RESUME VÀ GIẢ LẬP NGƯỜI DÙNG
+            # Sửa --header thành --add-header
+            # Đổi output sang .ts để hỗ trợ Resume (tải nối tiếp) tốt nhất
             yt-dlp \
               "$URL" \
               --quiet --progress --progress-delta 15 \
-              --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" \
-              --header "Referer: https://tmstr4.neonhorizonworkshops.com/" \
+              --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36" \
+              --add-header "Referer:https://tmstr4.neonhorizonworkshops.com/" \
+              --add-header "Origin:https://tmstr4.neonhorizonworkshops.com" \
               --concurrent-fragments 1 \
-              --sleep-requests 2 \
+              --sleep-requests 3 \
               --fragment-retries 0 \
               --abort-on-unavailable-fragment \
               --hls-use-mpegts \
               --continue \
-              --no-overwrites \
-              -o input_video.mp4 && break
+              -o "video_temp.ts" && break
       
-            # Nếu bị lỗi 429, nghỉ lâu hơn (2 phút) để Server nhả IP
             echo ""
-            echo "::warning ::Limit reached or Error. Progress saved. Cooling down for 120s..."
+            echo "::warning ::429 Limit reached. Progress saved in .ts file. Waiting 120s..."
             sleep 120
           done
       
-          if [ -s input_video.mp4 ]; then
-            echo "SUCCESS: Video download complete."
+          # Sau khi tải xong file .ts, đổi đuôi sang .mp4 mà không mất chất lượng
+          if [ -s video_temp.ts ]; then
+            echo "Converting TS to MP4..."
+            ffmpeg -i video_temp.ts -c copy input_video.mp4
+            rm video_temp.ts
+            echo "SUCCESS: input_video.mp4 is ready."
           else
-            echo "ERROR: Could not finish download."
+            echo "ERROR: Download failed."
             exit 1
           fi
                   
