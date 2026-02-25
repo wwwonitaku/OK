@@ -50,11 +50,9 @@ jobs:
             yt-dlp \
               "$URL" \
               --quiet --progress --progress-delta 15 \
-              --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36" \
-              --add-header "Referer:https://tmstr4.neonhorizonworkshops.com/" \
-              --add-header "Origin:https://tmstr4.neonhorizonworkshops.com" \
               --concurrent-fragments 1 \
-              --sleep-requests 3 \
+              --sleep-requests 15 \
+              --limit-rate 1M \
               --fragment-retries 0 \
               --abort-on-unavailable-fragment \
               --hls-use-mpegts \
