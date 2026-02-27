@@ -33,47 +33,9 @@ jobs:
           python3 -m pip install --upgrade pip
           pip install --upgrade yt-dlp
           
-      - name: Download Video from m3u8 Link (Stable Resume)
+      - name: Download Video from m3u8 Link
         run: |
-          URL="${{ github.event.inputs.link }}"
-          
-          MAX_RETRY=100
-          COUNT=0
-      
-          until [ $COUNT -ge $MAX_RETRY ]
-          do
-            COUNT=$((COUNT+1))
-            echo "::notice ::Attempt $COUNT/$MAX_RETRY - Downloading..."
-      
-            # Sửa --header thành --add-header
-            # Đổi output sang .ts để hỗ trợ Resume (tải nối tiếp) tốt nhất
-            yt-dlp \
-              "$URL" \
-              --quiet --progress --progress-delta 15 \
-              --concurrent-fragments 1 \
-              --sleep-requests 1 \
-              --limit-rate 1M \
-              --fragment-retries 0 \
-              --abort-on-unavailable-fragment \
-              --hls-use-mpegts \
-              --continue \
-              -o "video_temp.ts" && break
-      
-            echo ""
-            echo "::warning ::429 Limit reached. Progress saved in .ts file. Waiting 120s..."
-            sleep 120
-          done
-      
-          # Sau khi tải xong file .ts, đổi đuôi sang .mp4 mà không mất chất lượng
-          if [ -s video_temp.ts ]; then
-            echo "Converting TS to MP4..."
-            ffmpeg -i video_temp.ts -c copy input_video.mp4
-            rm video_temp.ts
-            echo "SUCCESS: input_video.mp4 is ready."
-          else
-            echo "ERROR: Download failed."
-            exit 1
-          fi
+          ffmpeg -y -i "${{ github.event.inputs.link }}" -c copy -bsf:a aac_adtstoasc input_video.mp4
                   
       - name: Convert to HLS fMP4 (Segments as PNG)
         run: |
