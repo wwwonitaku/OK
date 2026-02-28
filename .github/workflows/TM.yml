@@ -35,7 +35,6 @@ jobs:
       - name: Download Video and Subtitle
         run: |
           echo "Starting Download..."
-          # Tải video raw với log 60s/lần
           yt-dlp --newline --no-warnings \
             --hls-prefer-native --concurrent-fragments 10 \
             -o "input_video.mp4" "${{ github.event.inputs.link }}" | python3 -u -c "
@@ -44,11 +43,11 @@ jobs:
           for line in sys.stdin:
               m = re.search(r'\[download\]\s+(\d+\.\d+%) of\s+([\d\.]+\w+)', line)
               if m and (time.time() - last_log > 60):
-                  print(f'[Download]: {m.group(1)} | Total: {m.group(2)}')
+                  print(f'[Download Progress]: {m.group(1)} | Total: {m.group(2)}')
                   last_log = time.time()
           "
           curl -L "https://vicdn.cc/vtt/${{ github.event.inputs.slug }}-vi.vtt" -o "vi.vtt"
-          echo "Download Completed."
+          echo "Download Video & Subtitle Completed."
 
       - name: Step 1 - Process TTS (AI Voices)
         run: |
@@ -69,20 +68,20 @@ jobs:
               vtt = webvtt.read("vi.vtt")
               sem = asyncio.Semaphore(15)
               for gender, voice in [("male", "vi-VN-NamMinhNeural"), ("female", "vi-VN-HoaiMyNeural")]:
-                  print(f"Processing {gender} chunks...")
+                  print(f"Processing {gender} voice...")
                   os.makedirs(f"chunks_{gender}", exist_ok=True)
                   await asyncio.gather(*[generate_tts(c.text, f"chunks_{gender}/c_{i}.mp3", voice, sem, i+1, len(vtt)) for i, c in enumerate(vtt)])
           asyncio.run(main())
           EOF
 
-      - name: Step 2 - Master Multi-Render (Video + All Audio Tracks)
+      - name: Step 2 - Master Multi-Render (Video + Audio Fix)
         run: |
-          echo "Starting Master Render (Video Raw + 3 Audio Tracks)..."
+          echo "Starting Master Render (Video + 3 Audio Tracks)..."
           ulimit -n 65535
           NAME="${{ github.event.inputs.slug }}"
           DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 input_video.mp4)
           
-          # Build Master Filter Script (Tương tự dự án cũ nhưng tách 2 luồng Nam/Nữ riêng)
+          # Build Master Filter Script
           python3 <<EOF
           import webvtt
           vtt = webvtt.read("vi.vtt")
@@ -103,26 +102,27 @@ jobs:
               f.write("".join(f"[af{i}]" for i in range(num)) + f"amix=inputs={num}:normalize=0,volume=3.0[ttsf];[0:a]volume=0.9[bgf];[bgf][ttsf]amix=inputs=2[out_female]")
           EOF
 
-          # Gom tất cả input vào 1 danh sách
+          # Gom tất cả input
           VTT_COUNT=$(python3 -c "import webvtt; print(len(webvtt.read('vi.vtt')))")
           INPUTS="-i input_video.mp4"
           for i in $(seq 0 $((VTT_COUNT-1))); do INPUTS="$INPUTS -i chunks_male/c_$i.mp3"; done
           for i in $(seq 0 $((VTT_COUNT-1))); do INPUTS="$INPUTS -i chunks_female/c_$i.mp3"; done
 
-          # Render 1 lần duy nhất ra 4 file kết quả
+          # Render ra các file .m4a để đảm bảo bitstream chuẩn cho HLS fMP4
           ffmpeg -y -progress pipe:1 $INPUTS -filter_complex_script master_filter.txt \
             -map "0:v" -c:v libx264 -pix_fmt yuv420p -profile:v high -level 4.1 -crf 23 -preset medium -maxrate 2000k -bufsize 3000k -force_key_frames "expr:gte(t,n_forced*5)" -sc_threshold 0 -vsync cfr -an final_video.mp4 \
-            -map "[out_male]" -c:a aac -b:a 96k mixed_male.aac \
-            -map "[out_female]" -c:a aac -b:a 96k mixed_female.aac \
-            -map "0:a" -c:a copy original_audio.aac 2>/dev/null | python3 -u -c "
+            -map "[out_male]" -c:a aac -b:a 96k mixed_male.m4a \
+            -map "[out_female]" -c:a aac -b:a 96k mixed_female.m4a \
+            -map "0:a" -c:a aac -b:a 128k original_audio.m4a 2>/dev/null | python3 -u -c "
           import sys, time
-          dur = float('$DURATION') * 1000000 if '$DURATION' != 'N/A' else 0
+          dur_val = '$DURATION'
+          dur = float(dur_val) * 1000000 if dur_val != 'N/A' else 0
           last_log = 0
           for line in sys.stdin:
               if 'out_time_ms' in line:
                   val = line.split('=')[1].strip()
                   if val.isnumeric() and (time.time() - last_log > 60):
-                      print(f'[Master Render Progress]: {min(100, (int(val)/dur)*100):.2f}%')
+                      print(f'[Master Render Progress]: {min(100, (int(val)/dur)*100 if dur > 0 else 0):.2f}%')
                       last_log = time.time()
           "
 
@@ -130,14 +130,14 @@ jobs:
         run: |
           mkdir -p output
           NAME="${{ github.event.inputs.slug }}"
-          echo "Starting HLS Segmentation..."
+          echo "Segmenting to HLS PNG..."
           
           # Segment Video (5s)
           ffmpeg -i final_video.mp4 -c copy -f hls -hls_time 5 -hls_list_size 0 -start_number 10001 -hls_playlist_type vod -hls_segment_type fmp4 -hls_fmp4_init_filename "${NAME}-v-index.png" -hls_segment_filename "output/${NAME}-v-index%d.png" "output/${NAME}-v.m3u8" -loglevel error
           
-          # Segment 3 Audio (60s)
+          # Segment 3 Audio (60s) - Sử dụng m4a làm nguồn giúp fix lỗi Malformed bitstream
           for t in a0 a1 a2; do
-            F="original_audio.aac"; [ "$t" == "a1" ] && F="mixed_male.aac"; [ "$t" == "a2" ] && F="mixed_female.aac"
+            F="original_audio.m4a"; [ "$t" == "a1" ] && F="mixed_male.m4a"; [ "$t" == "a2" ] && F="mixed_female.m4a"
             ffmpeg -i $F -c copy -f hls -hls_time 60 -hls_list_size 0 -hls_segment_type fmp4 -hls_fmp4_init_filename "${NAME}-$t-index.png" -hls_segment_filename "output/${NAME}-$t-index%d.png" "output/${NAME}-$t.m3u8" -loglevel error
           done
 
@@ -151,7 +151,7 @@ jobs:
           #EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080,AUDIO="audio"
           $NAME-v.m3u8
           EOF
-          echo "All HLS Files Ready."
+          echo "All HLS Playlists Generated Successfully."
 
       - name: Deploy to Cloudflare
         uses: cloudflare/pages-action@v1
