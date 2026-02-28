@@ -30,10 +30,18 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
+          python3 -m pip install -U yt-dlp
           
       - name: Download Video from m3u8 Link
         run: |
-          ffmpeg -y -i "${{ github.event.inputs.link }}" -c copy -bsf:a aac_adtstoasc input_video.mp4
+          yt-dlp \
+            --hls-prefer-native \
+            --concurrent-fragments 5 \
+            --retries infinite \
+            --fragment-retries infinite \
+            --retry-sleep 5 \
+            -o "input_video.mp4" \
+            "${{ github.event.inputs.link }}"
                   
       - name: Convert to HLS fMP4 (Segments as PNG)
         run: |
