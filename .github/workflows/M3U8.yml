@@ -36,7 +36,7 @@ jobs:
         run: |
           yt-dlp \
             --hls-prefer-native \
-            --concurrent-fragments 5 \
+            --concurrent-fragments 10 \
             --retries infinite \
             --fragment-retries infinite \
             --retry-sleep 5 \
