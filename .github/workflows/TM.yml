@@ -35,11 +35,11 @@ jobs:
       - name: Download Video and Subtitle
         run: |
           echo "Starting Download..."
-          # Tải video raw với log 1 dòng
+          # Tải video raw với log realtime 1 dòng
           yt-dlp --newline --progress --no-warnings \
             --hls-prefer-native --concurrent-fragments 10 \
             --retries infinite --fragment-retries infinite --retry-sleep 5 \
-            -o "input_video.mp4" "${{ github.event.inputs.link }}" | python3 -c "
+            -o "input_video.mp4" "${{ github.event.inputs.link }}" | python3 -u -c "
           import sys, re
           for line in sys.stdin:
               m = re.search(r'\[download\]\s+(\d+\.\d+%) of\s+([\d\.]+\w+)', line)
@@ -56,7 +56,7 @@ jobs:
       - name: Step 1 - Process TTS (AI Voices)
         run: |
           echo "Generating AI Voices (Male & Female)..."
-          python3 <<EOF
+          python3 -u <<EOF
           import asyncio, edge_tts, webvtt, os, re, subprocess
 
           def normalize_for_tts(text):
@@ -94,11 +94,15 @@ jobs:
           mkdir -p output
           NAME="${{ github.event.inputs.slug }}"
           
+          # Nâng giới hạn file để không bị treo khi mix hàng nghìn file audio
+          ulimit -n 65535
+          DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 input_video.mp4)
+
           # Trích xuất audio gốc 128k
           ffmpeg -i input_video.mp4 -vn -acodec aac -b:a 96k original_audio.aac -loglevel error
 
-          # Tạo script mix dựa trên logic của bạn
-          python3 <<EOF
+          # Tạo script mix (giữ nguyên logic filter của bạn)
+          python3 -u <<EOF
           import webvtt
           vtt = webvtt.read("vi.vtt")
           for gender in ["male", "female"]:
@@ -114,11 +118,22 @@ jobs:
                   mix_filter += "".join(f"[a{i}]" for i in range(len(vtt)))
                   mix_filter += f"amix=inputs={len(vtt)}:normalize=0,volume=3.0[tts];"
                   mix_filter += f"[0:a]volume=0.9[bg];[bg][tts]amix=inputs=2[out_audio]"
-                  f.write(f"ffmpeg -y -i original_audio.aac {inputs} -filter_complex \"{mix_filter}\" -map \"[out_audio]\" -c:a aac -b:a 96k mixed_{gender}.aac -loglevel error")
+                  f.write(f"ffmpeg -y -i original_audio.aac {inputs} -filter_complex \"{mix_filter}\" -map \"[out_audio]\" -c:a aac -b:a 96k -progress pipe:1 mixed_{gender}.aac -loglevel error")
           EOF
 
-          bash mix_male.sh
-          bash mix_female.sh
+          # Chạy mix với log realtime
+          for g in male female; do
+            echo "Mixing $g audio..."
+            bash mix_$g.sh | python3 -u -c "
+          import sys
+          dur = float('$DURATION') * 1000000
+          for line in sys.stdin:
+              if 'out_time_ms' in line:
+                  t = int(line.split('=')[1])
+                  sys.stdout.write(f'\r[Mix Progress]: {min(100, (t/dur)*100):.2f}%')
+                  sys.stdout.flush()
+          "
+          done
 
           # Chuyển thành HLS fMP4 PNG (A0: Gốc, A1: Nam, A2: Nữ)
           for type in a0 a1 a2; do
@@ -127,22 +142,22 @@ jobs:
               -hls_segment_type fmp4 -hls_fmp4_init_filename "${NAME}-${type}-index.png" \
               -hls_segment_filename "output/${NAME}-${type}-index%d.png" "output/${NAME}-${type}.m3u8" -loglevel error
           done
-          echo "Audio Playlists Created."
+          echo -e "\nAudio Playlists Created."
 
       - name: Step 3 - Encode Video Raw and Create HLS
         run: |
-          echo "Encoding Video (Raw) with log 1 dòng..."
+          echo "Encoding Video (Raw) với log realtime..."
           NAME="${{ github.event.inputs.slug }}"
           DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 input_video.mp4)
           
-          # Encode Video theo đúng code gốc của bạn (loại bỏ audio, thêm -an)
+          # Encode Video (Giữ nguyên logic scale và flags của bạn)
           ffmpeg -y -progress pipe:1 -i input_video.mp4 \
             -vf "scale='if(gt(iw,1920),1920,if(gt(ih,1080),-2,iw))':'if(gt(ih,1080),1080,if(gt(iw,1920),-2,ih))',format=yuv420p" \
             -c:v libx264 -pix_fmt yuv420p -profile:v high -level 4.1 -crf 23 -preset medium \
             -maxrate 2000k -bufsize 3000k \
             -force_key_frames "expr:gte(t,n_forced*5)" -sc_threshold 0 \
             -vsync cfr -an -threads 0 -movflags +faststart \
-            final.mp4 2>/dev/null | python3 -c "
+            final.mp4 2>/dev/null | python3 -u -c "
           import sys
           duration = float('$DURATION') * 1000000
           for line in sys.stdin:
