@@ -35,23 +35,21 @@ jobs:
       - name: Download Video and Subtitle
         run: |
           echo "Starting Download..."
-          # Tải video raw với log realtime 1 dòng
+          # Tải video raw với log 1 phút 1 lần
           yt-dlp --newline --progress --no-warnings \
             --hls-prefer-native --concurrent-fragments 10 \
             --retries infinite --fragment-retries infinite --retry-sleep 5 \
             -o "input_video.mp4" "${{ github.event.inputs.link }}" | python3 -u -c "
-          import sys, re
+          import sys, re, time
+          last_log = 0
           for line in sys.stdin:
               m = re.search(r'\[download\]\s+(\d+\.\d+%) of\s+([\d\.]+\w+)', line)
-              if m:
-                  sys.stdout.write(f'\r[Download Progress]: {m.group(1)} | Total: {m.group(2)}')
-                  sys.stdout.flush()
+              if m and (time.time() - last_log > 60):
+                  print(f'[Download Progress]: {m.group(1)} | Total: {m.group(2)}')
+                  last_log = time.time()
           "
           echo -e "\nDownload Video Completed."
-          
-          # Tải vietsub
           curl -L "https://vicdn.cc/vtt/${{ github.event.inputs.slug }}-vi.vtt" -o "vi.vtt"
-          echo "Subtitle Downloaded."
 
       - name: Step 1 - Process TTS (AI Voices)
         run: |
@@ -72,85 +70,82 @@ jobs:
                       await edge_tts.Communicate(normalize_for_tts(text), voice=voice, rate="+28%").save(out)
                   except:
                       subprocess.run(["ffmpeg","-y","-f","lavfi","-i","anullsrc=r=24000:cl=mono","-t","0.1",out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                  if idx % 10 == 0 or idx == total:
-                      print(f"\r[TTS Progress]: {idx}/{total} chunks", end="", flush=True)
+                  if idx % 50 == 0 or idx == total:
+                      print(f"[TTS Progress]: {idx}/{total} chunks", flush=True)
 
           async def main():
               vtt = webvtt.read("vi.vtt")
               sem = asyncio.Semaphore(15)
               for gender, voice in [("male", "vi-VN-NamMinhNeural"), ("female", "vi-VN-HoaiMyNeural")]:
-                  print(f"\nProcessing {gender} voice...")
+                  print(f"Processing {gender} voice...")
                   os.makedirs(f"chunks_{gender}", exist_ok=True)
                   tasks = [generate_tts(c.text, f"chunks_{gender}/c_{i}.mp3", voice, sem, i+1, len(vtt)) for i, c in enumerate(vtt)]
                   await asyncio.gather(*tasks)
 
           asyncio.run(main())
           EOF
-          echo -e "\nTTS Generation Completed."
 
       - name: Step 2 - Mix and Create Audio HLS (A0, A1, A2)
         run: |
           echo "Mixing Audio and Segmenting to HLS PNG..."
           mkdir -p output
           NAME="${{ github.event.inputs.slug }}"
-          
-          # Nâng giới hạn file để không bị treo khi mix hàng nghìn file audio
           ulimit -n 65535
+          
+          # Lấy duration và xử lý lỗi N/A
           DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 input_video.mp4)
-
-          # Trích xuất audio gốc 128k
           ffmpeg -i input_video.mp4 -vn -acodec aac -b:a 96k original_audio.aac -loglevel error
 
-          # Tạo script mix (giữ nguyên logic filter của bạn)
+          # Tạo script mix (Dùng filter_complex_script để tránh lỗi Command line too long)
           python3 -u <<EOF
-          import webvtt
+          import webvtt, os, time, sys
           vtt = webvtt.read("vi.vtt")
+          duration_ms = float("$DURATION") * 1000000 if "$DURATION" != "N/A" else 0
+          
           for gender in ["male", "female"]:
-              with open(f"mix_{gender}.sh", "w") as f:
-                  inputs = ""
-                  mix_filter = ""
+              filter_path = f"f_{gender}.txt"
+              with open(filter_path, "w") as f:
                   for i, c in enumerate(vtt):
                       h, m, s = c.start.replace(',', '.').split(':')
                       ms = int(float(h)*3600000 + float(m)*60000 + float(s)*1000) + 500
-                      inputs += f" -i chunks_{gender}/c_{i}.mp3"
-                      mix_filter += f"[{i+1}:a]adelay={ms}|{ms}[a{i}];"
-                  
-                  mix_filter += "".join(f"[a{i}]" for i in range(len(vtt)))
-                  mix_filter += f"amix=inputs={len(vtt)}:normalize=0,volume=3.0[tts];"
-                  mix_filter += f"[0:a]volume=0.9[bg];[bg][tts]amix=inputs=2[out_audio]"
-                  f.write(f"ffmpeg -y -i original_audio.aac {inputs} -filter_complex \"{mix_filter}\" -map \"[out_audio]\" -c:a aac -b:a 96k -progress pipe:1 mixed_{gender}.aac -loglevel error")
+                      f.write(f"[{i+1}:a]adelay={ms}|{ms}[a{i}];")
+                  f.write("".join(f"[a{i}]" for i in range(len(vtt))) + f"amix=inputs={len(vtt)}:normalize=0,volume=3.0[tts];[0:a]volume=0.9[bg];[bg][tts]amix=inputs=2[out]")
+
+              # Build command
+              cmd = ["ffmpeg", "-y", "-i", "original_audio.aac"]
+              for i in range(len(vtt)): cmd.extend(["-i", f"chunks_{gender}/c_{i}.mp3"])
+              cmd.extend(["-filter_complex_script", filter_path, "-map", "[out]", "-c:a", "aac", "-b:a", "96k", "-progress", "pipe:1", f"mixed_{gender}.aac"])
+              
+              print(f"Start mixing {gender}...")
+              import subprocess
+              proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True)
+              last_log = 0
+              for line in proc.stdout:
+                  if "out_time_ms" in line:
+                      try:
+                          val = line.split("=")[1].strip()
+                          if val.isnumeric() and time.time() - last_log > 60:
+                              t = int(val)
+                              pct = (t / duration_ms * 100) if duration_ms > 0 else 0
+                              print(f"[Mix Progress {gender}]: {pct:.2f}%")
+                              last_log = time.time()
+                      except: pass
+              proc.wait()
           EOF
 
-          # Chạy mix với log realtime
-          for g in male female; do
-            echo "Mixing $g audio..."
-            bash mix_$g.sh | python3 -u -c "
-          import sys
-          dur = float('$DURATION') * 1000000
-          for line in sys.stdin:
-              if 'out_time_ms' in line:
-                  t = int(line.split('=')[1])
-                  sys.stdout.write(f'\r[Mix Progress]: {min(100, (t/dur)*100):.2f}%')
-                  sys.stdout.flush()
-          "
-          done
-
-          # Chuyển thành HLS fMP4 PNG (A0: Gốc, A1: Nam, A2: Nữ)
           for type in a0 a1 a2; do
             FILE="original_audio.aac"; [ "$type" == "a1" ] && FILE="mixed_male.aac"; [ "$type" == "a2" ] && FILE="mixed_female.aac"
             ffmpeg -i $FILE -c copy -f hls -hls_time 60 -hls_list_size 0 \
               -hls_segment_type fmp4 -hls_fmp4_init_filename "${NAME}-${type}-index.png" \
               -hls_segment_filename "output/${NAME}-${type}-index%d.png" "output/${NAME}-${type}.m3u8" -loglevel error
           done
-          echo -e "\nAudio Playlists Created."
 
       - name: Step 3 - Encode Video Raw and Create HLS
         run: |
-          echo "Encoding Video (Raw) với log realtime..."
+          echo "Encoding Video (Raw) with log (60s interval)..."
           NAME="${{ github.event.inputs.slug }}"
           DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 input_video.mp4)
           
-          # Encode Video (Giữ nguyên logic scale và flags của bạn)
           ffmpeg -y -progress pipe:1 -i input_video.mp4 \
             -vf "scale='if(gt(iw,1920),1920,if(gt(ih,1080),-2,iw))':'if(gt(ih,1080),1080,if(gt(iw,1920),-2,ih))',format=yuv420p" \
             -c:v libx264 -pix_fmt yuv420p -profile:v high -level 4.1 -crf 23 -preset medium \
@@ -158,27 +153,25 @@ jobs:
             -force_key_frames "expr:gte(t,n_forced*5)" -sc_threshold 0 \
             -vsync cfr -an -threads 0 -movflags +faststart \
             final.mp4 2>/dev/null | python3 -u -c "
-          import sys
-          duration = float('$DURATION') * 1000000
+          import sys, time
+          dur = float('$DURATION') * 1000000 if '$DURATION' != 'N/A' else 0
+          last_log = 0
           for line in sys.stdin:
               if 'out_time_ms' in line:
-                  time = int(line.split('=')[1])
-                  sys.stdout.write(f'\r[Encode Progress]: {min(100, (time/duration)*100):.2f}%')
-                  sys.stdout.flush()
+                  try:
+                      val = line.split('=')[1].strip()
+                      if val.isnumeric() and time.time() - last_log > 60:
+                          t = int(val)
+                          pct = (t / dur * 100) if dur > 0 else 0
+                          print(f'[Encode Progress]: {pct:.2f}%')
+                          last_log = time.time()
+                  except: pass
           "
-          echo -e "\nVideo Encoding Completed."
+          
+          ffmpeg -i final.mp4 -c copy -f hls -hls_time 5 -hls_list_size 0 -start_number 10001 \
+            -hls_playlist_type vod -hls_segment_type fmp4 -hls_fmp4_init_filename "${NAME}-v-index.png" \
+            -hls_segment_filename "output/${NAME}-v-index%d.png" "output/${NAME}-v.m3u8" -loglevel error
 
-          # Chuyển video sang HLS fMP4 PNG
-          ffmpeg -i final.mp4 -c copy -f hls \
-            -hls_time 5 -hls_list_size 0 \
-            -start_number 10001 \
-            -hls_playlist_type vod \
-            -hls_segment_type fmp4 \
-            -hls_fmp4_init_filename "${NAME}-v-index.png" \
-            -hls_segment_filename "output/${NAME}-v-index%d.png" \
-            "output/${NAME}-v.m3u8" -loglevel error
-
-          # Tạo Master Playlist tổng hợp
           cat <<EOF > output/${{ github.event.inputs.slug }}.m3u8
           #EXTM3U
           #EXT-X-VERSION:4
@@ -188,7 +181,6 @@ jobs:
           #EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1920x1080,AUDIO="audio"
           $NAME-v.m3u8
           EOF
-          echo "All Playlists Generated."
 
       - name: Deploy to Cloudflare Pages (first)
         id: deploy1
@@ -200,7 +192,7 @@ jobs:
           directory: ./output
           branch: ${{ github.event.inputs.slug }}
 
-      - name: Verify Cloudflare deployment (branch domain check)
+      - name: Verify Cloudflare deployment
         id: verify
         continue-on-error: true
         env:
@@ -210,36 +202,19 @@ jobs:
           set -e
           FILE_URL="https://${{ github.event.inputs.slug }}.${{ github.event.inputs.page }}.pages.dev/${{ github.event.inputs.slug }}.m3u8"
           echo "[TARGET] $FILE_URL"
-
           check () {
             code=$(curl -L -o /dev/null -s -w "%{http_code}" "$FILE_URL")
             echo "HTTP CODE: $code"
             [ "$code" = "200" ]
           }
-
-          echo "[WAIT] Waiting 1 minutes for Pages propagation..."
-          sleep 60
-
-          echo "[CHECK #1]"
-          if check; then
-            echo "[SUCCESS] File exists"
-            exit 0
-          fi
-
-          echo "[WAIT] Still not found, wait extra 3 minutes..."
-          sleep 180
-
-          echo "[CHECK #2]"
-          if check; then
-            echo "[SUCCESS] File exists after delay"
-            exit 0
-          fi
-
-          echo "[FAIL] File still missing → mark for redeploy"
+          echo "Waiting 60s..." && sleep 60
+          if check; then exit 0; fi
+          echo "Waiting 180s..." && sleep 180
+          if check; then exit 0; fi
           echo "NEED_REDEPLOY=true" >> $GITHUB_ENV
           exit 1
 
-      - name: Deploy to Cloudflare Pages (retry – reuse encoded files)
+      - name: Deploy Retry
         if: env.NEED_REDEPLOY == 'true'
         uses: cloudflare/pages-action@v1
         with:
