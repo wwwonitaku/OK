@@ -45,7 +45,7 @@ jobs:
             -o "input_video.mp4" \
             "${{ github.event.inputs.link }}" | while IFS= read -r line; do
               now=$(date +%s)
-              if [ $((now - last)) -ge 60 ]; then
+              if [ $((now - last)) -ge 20 ]; then
                 echo "$line"
                 last=$now
               fi
