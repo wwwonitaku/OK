@@ -229,7 +229,6 @@ jobs:
             -hls_fmp4_init_filename "${NAME}-index.png" \
             -hls_segment_filename "output/${NAME}-index%d.png" \
             "output/${NAME}.m3u8"
-          cp vi.vtt output/
 
       - name: Deploy to Cloudflare Pages (first)
         id: deploy1
