@@ -30,7 +30,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg
-          python3 -m pip install -U yt-dlp
+          python3 -m pip install -U yt-dlp webvtt-py edge-tts requests
           
       - name: Download Video from m3u8 Link
         run: |
@@ -138,24 +138,7 @@ jobs:
 
           asyncio.run(main())
           EOF
-
-      - name: Build Filter
-        run: |
-          python3 <<EOF
-          import webvtt
-          # Đọc file vi.vtt vừa tạo từ bước trên
-          vtt = webvtt.read("vi.vtt")
-          with open("master_filter.txt","w") as f:
-              for i,c in enumerate(vtt):
-                  h,m,s = c.start.replace(',','.').split(':')
-                  ms = int(float(h)*3600000 + float(m)*60000 + float(s)*1000) + 500
-                  f.write(f"[{i+1}:a]adelay={ms}|{ms}[a{i}];")
-              f.write("".join(f"[a{i}]" for i in range(len(vtt))))
-              f.write(f"amix=inputs={len(vtt)}:normalize=0,volume=3.0[tts];")
-              f.write("[0:a]volume=0.90[bg];[bg][tts]amix=inputs=2[out_audio];")
-              f.write("[0:v]subtitles=vi.vtt:fontsdir=fonts:force_style='FontName=Oswald,PrimaryColour=&H00FFFF&,FontSize=33,Outline=0.4,Shadow=0.4'[out_video]")
-          EOF
-
+          
       - name: Build Filter
         run: |
           python3 <<EOF
@@ -174,7 +157,7 @@ jobs:
 
       - name: Render & HLS
         run: |
-          NAME= ${{ github.event.inputs.slug }}
+          NAME= "${{ github.event.inputs.slug }}"
           COUNT=$(cat count.txt)
           INPUTS="-i raw_video.mp4"
           for ((i=0; i<COUNT; i++)); do
