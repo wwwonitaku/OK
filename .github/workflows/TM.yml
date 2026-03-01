@@ -54,8 +54,7 @@ jobs:
       - name: Setup Subtitle Font (Oswald)
         run: |
           mkdir -p fonts
-          curl -L https://github.com/wwwonitaku/Linux/raw/main/Oswald.zip -o Oswald.zip
-          unzip -o Oswald.zip -d fonts
+          curl -L https://github.com/wwwonitaku/Linux/raw/main/UVNHongHaHep_B.TTF -o fonts/UVNHongHaHep_B.TTF
           fc-cache -f fonts
 
       - name: Download Vietnamese Subtitle
@@ -152,12 +151,11 @@ jobs:
               f.write("".join(f"[a{i}]" for i in range(len(vtt))))
               f.write(f"amix=inputs={len(vtt)}:normalize=0,volume=3.0[tts];")
               f.write("[0:a]volume=0.90[bg];[bg][tts]amix=inputs=2[out_audio];")
-              f.write("[0:v]subtitles=vi.vtt:fontsdir=fonts:force_style='FontName=Oswald,PrimaryColour=&H00FFFF&,FontSize=33,Outline=0.4,Shadow=0.4'[out_video]")
+              f.write("[0:v]subtitles=vi.vtt:fontsdir=fonts:force_style='FontName=UVN Hong Ha Hep,PrimaryColour=&H00FFFF&,FontSize=33,Outline=0.4,Shadow=0.4'[out_video]")
           EOF
 
       - name: Render & HLS
         run: |
-          NAME= "${{ github.event.inputs.slug }}"
           COUNT=$(cat count.txt)
           INPUTS="-i raw_video.mp4"
           for ((i=0; i<COUNT; i++)); do
@@ -166,18 +164,18 @@ jobs:
 
           ffmpeg -y $INPUTS -filter_complex_script master_filter.txt \
             -map "[out_video]" -map "[out_audio]" \
-            -c:v libx264 -crf 25 -preset medium -tune animation \
-            -pix_fmt yuv420p -maxrate 1800k -bufsize 3000k\
+            -c:v libx264 -pix_fmt yuv420p -profile:v high -level 4.1 -crf 23 -preset medium \
+            -maxrate 2000k -bufsize 3000k \
             -force_key_frames "expr:gte(t,n_forced*5)" -sc_threshold 0 \
-            -c:a aac -b:a 96k -threads 0 final.mp4
+            -vsync cfr -c:a aac -b:a 96k -ac 2 -threads 0 -movflags +faststart final.mp4
 
           mkdir -p output
           ffmpeg -i final.mp4 -c copy -f hls \
             -hls_time 5 -hls_list_size 0 -start_number 10001 -hls_playlist_type vod \
             -hls_segment_type fmp4 \
-            -hls_fmp4_init_filename "${NAME}-index.png" \
-            -hls_segment_filename "output/${NAME}-index%d.png" \
-            "output/${NAME}.m3u8"
+            -hls_fmp4_init_filename "${{ github.event.inputs.slug }}-index.png" \
+            -hls_segment_filename "output/${{ github.event.inputs.slug }}-index%d.png" \
+            "output/${{ github.event.inputs.slug }}.m3u8"
 
       - name: Deploy to Cloudflare Pages (first)
         id: deploy1
