@@ -42,7 +42,7 @@ jobs:
             --fragment-retries infinite \
             --retry-sleep 5 \
             --newline \
-            -o "input_video.mp4" \
+            -o "raw_video.mp4" \
             "${{ github.event.inputs.link }}" | while IFS= read -r line; do
               now=$(date +%s)
               if [ $((now - last)) -ge 10 ]; then
