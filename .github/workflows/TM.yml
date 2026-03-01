@@ -51,7 +51,7 @@ jobs:
               fi
             done
 
-      - name: Setup Subtitle Font (Oswald)
+      - name: Setup Subtitle Font
         run: |
           mkdir -p fonts
           curl -L https://github.com/wwwonitaku/Linux/raw/main/UVNHongHaHep_B.TTF -o fonts/UVNHongHaHep_B.TTF
@@ -59,10 +59,7 @@ jobs:
 
       - name: Download Vietnamese Subtitle
         run: |
-          # Tải sub Việt từ server về với tên vi_downloaded.vtt
           CHECK_URL="https://vicdn.cc/vtt/${{ github.event.inputs.slug }}-vi.vtt"
-          echo "[INFO] Downloading sub from: $CHECK_URL"
-          
           if curl -L --fail "$CHECK_URL" -o vi_downloaded.vtt; then
             echo "[INFO] Downloaded successfully."
           else
@@ -70,7 +67,7 @@ jobs:
             exit 1
           fi
 
-      - name: TTS Generation (From downloaded sub)
+      - name: TTS Generation
         run: |
           python3 <<'EOF'
           import webvtt, os, time, re, requests, asyncio, edge_tts, subprocess
@@ -83,11 +80,9 @@ jobs:
               return text if len(text) <= max_len else text[:max_len] + "..."
 
           def normalize_for_tts(text):
-              # Chuyển thành chữ thường và làm sạch văn bản cho TTS
               text = text.lower()
               text = re.sub(r'\s+', ' ', text).strip()
               text = text.replace(",", ", ").replace(".", ". ").replace("?", "? ").replace("!", "! ")
-              text = text.replace("…", " ... ").replace("—", " ... ")
               if not text.endswith((".", "!", "?", "...")): text += "."
               return text
 
@@ -98,71 +93,66 @@ jobs:
                       tts = edge_tts.Communicate(tts_text, voice="vi-VN-HoaiMyNeural", rate="+28%")
                       await tts.save(out)
                       if not os.path.exists(out) or os.path.getsize(out) < 100: raise Exception("Fail")
-                      print(f"[TTS OK] #{idx}")
                   except:
-                      print(f"[TTS RETRY] #{idx}")
                       await asyncio.sleep(2)
                       try:
                           tts = edge_tts.Communicate(normalize_for_tts(text), voice="vi-VN-HoaiMyNeural", rate="+28%")
                           await tts.save(out)
                       except:
-                          # Tạo file lặng nếu TTS thất bại hoàn toàn
                           subprocess.run(["ffmpeg","-y","-f","lavfi","-i","anullsrc=r=24000:cl=mono","-t","0.1",out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
           async def main():
-            if not os.path.exists("vi_downloaded.vtt"):
-                print("[FATAL] vi_downloaded.vtt not found!")
-                raise SystemExit(1)
-
-            print("[INFO] Loading Vietnamese subtitle for TTS...")
             final_vtt = webvtt.read("vi_downloaded.vtt")
-            
             os.makedirs("chunks", exist_ok=True)
             vi_vtt_to_save = webvtt.WebVTT()
             semaphore = asyncio.Semaphore(MAX_CONCURRENT_TTS)
             tasks = []
-        
             for i, c in enumerate(final_vtt):
                 txt = safe_text(c.text)
-                # Lưu lại caption vào file vi.vtt mới (để đồng bộ với logic build filter)
                 vi_vtt_to_save.captions.append(webvtt.Caption(c.start, c.end, txt))
                 tasks.append(generate_tts(txt, f"chunks/c_{i}.mp3", i, semaphore))
-        
             await asyncio.gather(*tasks)
             vi_vtt_to_save.save("vi.vtt")
-        
-            with open("count.txt", "w") as f:
-                f.write(str(len(final_vtt)))
-            print(f"[DONE] TTS completed for {len(final_vtt)} segments")
-
+            with open("count.txt", "w") as f: f.write(str(len(final_vtt)))
           asyncio.run(main())
           EOF
-          
-      - name: Build Filter
+
+      - name: Build Filter Scripts
         run: |
           python3 <<EOF
           import webvtt
           vtt = webvtt.read("vi.vtt")
-          with open("master_filter.txt","w") as f:
-              for i,c in enumerate(vtt):
-                  h,m,s = c.start.replace(',','.').split(':')
+          
+          # 1. Filter để gộp các mảnh audio (không chứa video)
+          with open("audio_merge.txt", "w") as f:
+              for i, c in enumerate(vtt):
+                  h, m, s = c.start.replace(',', '.').split(':')
                   ms = int(float(h)*3600000 + float(m)*60000 + float(s)*1000) + 500
-                  f.write(f"[{i+1}:a]adelay={ms}|{ms}[a{i}];")
+                  f.write(f"[{i}:a]adelay={ms}|{ms}[a{i}];")
               f.write("".join(f"[a{i}]" for i in range(len(vtt))))
-              f.write(f"amix=inputs={len(vtt)}:normalize=0,volume=3.0[tts];")
-              f.write("[0:a]volume=0.90[bg];[bg][tts]amix=inputs=2[out_audio];")
+              f.write(f"amix=inputs={len(vtt)}:normalize=0[out]")
+
+          # 2. Filter để render video cuối cùng (chỉ trộn audio master + sub)
+          with open("video_final.txt", "w") as f:
+              f.write("[0:a]volume=0.90[bg];[1:a]volume=3.0[tts];[bg][tts]amix=inputs=2[out_audio];")
               f.write("[0:v]subtitles=vi.vtt:fontsdir=fonts:force_style='FontName=UVN Hong Ha Hep,PrimaryColour=&H00FFFF&,FontSize=33,Outline=0.4,Shadow=0.4'[out_video]")
           EOF
 
-      - name: Render & HLS
+      - name: Master Audio Merging
         run: |
           COUNT=$(cat count.txt)
-          INPUTS="-i raw_video.mp4"
+          INPUTS=""
           for ((i=0; i<COUNT; i++)); do
             INPUTS="$INPUTS -i chunks/c_$i.mp3"
           done
+          # Gộp hàng nghìn mảnh MP3 thành 1 file duy nhất
+          ffmpeg -y $INPUTS -filter_complex_script audio_merge.txt -map "[out]" -c:a libmp3lame -b:a 128k tts_master.mp3
 
-          ffmpeg -y $INPUTS -filter_complex_script master_filter.txt \
+      - name: Render & HLS
+        run: |
+          NAME="${{ github.event.inputs.slug }}"
+          # Render video với duy nhất 2 input: Video gốc và Audio đã gộp
+          ffmpeg -y -i raw_video.mp4 -i tts_master.mp3 -filter_complex_script video_final.txt \
             -map "[out_video]" -map "[out_audio]" \
             -vf "scale='if(gt(iw,1920),1920,if(gt(ih,1080),-2,iw))':'if(gt(ih,1080),1080,if(gt(iw,1920),-2,ih))',format=yuv420p" \
             -c:v libx264 -pix_fmt yuv420p -profile:v high -level 4.1 -crf 23 -preset medium \
@@ -174,9 +164,9 @@ jobs:
           ffmpeg -i final.mp4 -c copy -f hls \
             -hls_time 5 -hls_list_size 0 -start_number 10001 -hls_playlist_type vod \
             -hls_segment_type fmp4 \
-            -hls_fmp4_init_filename "${{ github.event.inputs.slug }}-index.png" \
-            -hls_segment_filename "output/${{ github.event.inputs.slug }}-index%d.png" \
-            "output/${{ github.event.inputs.slug }}.m3u8"
+            -hls_fmp4_init_filename "${NAME}-index.png" \
+            -hls_segment_filename "output/${NAME}-index%d.png" \
+            "output/${NAME}.m3u8"
 
       - name: Deploy to Cloudflare Pages (first)
         id: deploy1
@@ -196,37 +186,16 @@ jobs:
           BRANCH: ${{ github.event.inputs.slug }}
         run: |
           set -e
-
           BASE_URL="https://${BRANCH}.${PROJECT}.pages.dev"
           FILE_URL="${BASE_URL}/${BRANCH}.m3u8"
-
-          echo "[TARGET] $FILE_URL"
-
           check () {
             code=$(curl -L -o /dev/null -s -w "%{http_code}" "$FILE_URL")
-            echo "HTTP CODE: $code"
             [ "$code" = "200" ]
           }
-
-          echo "[WAIT] Waiting 1 minutes for Pages propagation..."
           sleep 60
-
-          echo "[CHECK #1]"
-          if check; then
-            echo "[SUCCESS] File exists"
-            exit 0
-          fi
-
-          echo "[WAIT] Still not found, wait extra 3 minutes..."
+          if check; then exit 0; fi
           sleep 180
-
-          echo "[CHECK #2]"
-          if check; then
-            echo "[SUCCESS] File exists after delay"
-            exit 0
-          fi
-
-          echo "[FAIL] File still missing → mark for redeploy"
+          if check; then exit 0; fi
           echo "NEED_REDEPLOY=true" >> $GITHUB_ENV
           exit 1
 
