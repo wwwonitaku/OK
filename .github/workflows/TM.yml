@@ -1,4 +1,4 @@
-name: M3U8 Download ->> Audio (Long Video Fixed)
+name: M3U8 Download ->> Audio (Batch Processing)
 
 on:
   workflow_dispatch:
@@ -67,94 +67,91 @@ jobs:
             exit 1
           fi
 
-      - name: TTS Generation & List Creation
+      - name: Parallel TTS & Batch Audio Merging
         run: |
           python3 <<'EOF'
           import webvtt, os, re, asyncio, edge_tts, subprocess
 
-          MAX_CONCURRENT_TTS = 5
+          BATCH_SIZE = 100  # Mỗi batch xử lý 100 câu để tránh treo RAM
+          MAX_CONCURRENT_TTS = 8 
 
-          def time_to_sec(tstr):
-              # Chuyển 00:00:00.000 sang giây
+          def time_to_ms(tstr):
               h, m, s = tstr.replace(',', '.').split(':')
-              return float(h)*3600 + float(m)*60 + float(s)
+              return int(float(h)*3600000 + float(m)*60000 + float(s)*1000)
 
-          def safe_text(text, max_len=450):
+          def safe_text(text):
               if not text: return "..."
-              text = re.sub(r'\s+', ' ', text).strip()
-              return text if len(text) <= max_len else text[:max_len] + "..."
-
-          def normalize_for_tts(text):
-              text = text.lower()
-              text = re.sub(r'\s+', ' ', text).strip()
-              text = text.replace(",", ", ").replace(".", ". ").replace("?", "? ").replace("!", "! ")
-              if not text.endswith((".", "!", "?", "...")): text += "."
-              return text
+              return re.sub(r'\s+', ' ', text).strip()[:450]
 
           async def generate_tts(text, out, semaphore):
               async with semaphore:
-                  tts_text = normalize_for_tts(text)
-                  for attempt in range(2):
+                  for _ in range(3):
                       try:
-                          tts = edge_tts.Communicate(tts_text, voice="vi-VN-HoaiMyNeural", rate="+28%")
+                          tts = edge_tts.Communicate(text, voice="vi-VN-HoaiMyNeural", rate="+28%")
                           await tts.save(out)
-                          if os.path.exists(out) and os.path.getsize(out) > 100:
-                              return True
+                          if os.path.getsize(out) > 100: return True
                       except:
-                          await asyncio.sleep(2)
-                  # Nếu lỗi, tạo file im lặng 0.1s làm placeholder
+                          await asyncio.sleep(1)
                   subprocess.run(["ffmpeg","-y","-f","lavfi","-i","anullsrc=r=24000:cl=mono","-t","0.1",out], stderr=subprocess.DEVNULL)
-                  return False
+
+          async def process_batch(batch_idx, captions, semaphore):
+              print(f"Processing Batch {batch_idx} ({len(captions)} lines)...")
+              tasks = []
+              for i, c in captions:
+                  tasks.append(generate_tts(safe_text(c.text), f"chunks/c_{i}.mp3", semaphore))
+              await asyncio.gather(*tasks)
+              
+              # Gộp Batch ngay sau khi tải xong TTS của batch đó
+              inputs = []
+              filter_complex = ""
+              for idx, (i, c) in enumerate(captions):
+                  ms = time_to_ms(c.start) + 500
+                  inputs.extend(["-i", f"chunks/c_{i}.mp3"])
+                  filter_complex += f"[{idx}:a]adelay={ms}|{ms}[a{idx}];"
+              
+              filter_complex += "".join(f"[a{idx}]" for idx in range(len(captions)))
+              filter_complex += f"amix=inputs={len(captions)}:normalize=0[out]"
+              
+              batch_file = f"batches/batch_{batch_idx}.mp3"
+              cmd = ["ffmpeg", "-y"] + inputs + ["-filter_complex", filter_complex, "-map", "[out]", "-c:a", "libmp3lame", "-b:a", "128k", batch_file]
+              subprocess.run(cmd, stderr=subprocess.DEVNULL)
+              print(f"Done Batch {batch_idx}")
 
           async def main():
               vtt = webvtt.read("vi_downloaded.vtt")
               os.makedirs("chunks", exist_ok=True)
-              
-              # Tạo file im lặng gốc
-              subprocess.run(["ffmpeg","-y","-f","lavfi","-i","anullsrc=r=24000:cl=mono","-t","1","silence_1s.mp3"], stderr=subprocess.DEVNULL)
-              silence_path = os.path.abspath("silence_1s.mp3")
-              
+              os.makedirs("batches", exist_ok=True)
               semaphore = asyncio.Semaphore(MAX_CONCURRENT_TTS)
-              tasks = []
-              for i, c in enumerate(vtt):
-                  tasks.append(generate_tts(safe_text(c.text), f"chunks/c_{i}.mp3", semaphore))
               
-              print(f"Starting TTS for {len(vtt)} lines...")
-              await asyncio.gather(*tasks)
-
-              # Ghi file concat_list với đường dẫn tuyệt đối
-              with open("concat_list.txt", "w") as f:
-                  prev_end = 0.0
-                  for i, c in enumerate(vtt):
-                      start_sec = time_to_sec(c.start)
-                      gap = start_sec - prev_end
-                      
-                      if gap > 0:
-                          f.write(f"file '{silence_path}'\n")
-                          f.write(f"duration {gap}\n")
-                      
-                      chunk_path = os.path.abspath(f"chunks/c_{i}.mp3")
-                      f.write(f"file '{chunk_path}'\n")
-                      
-                      # Ước tính thời điểm kết thúc câu tiếp theo
-                      # Lưu ý: Concat demuxer sẽ tự nối tiếp, 
-                      # chúng ta chỉ cần chèn gap giữa các điểm bắt đầu.
-                      prev_end = start_sec + 0.05 # Một khoảng bù siêu nhỏ
+              all_caps = list(enumerate(vtt))
+              batch_tasks = []
+              for i in range(0, len(all_caps), BATCH_SIZE):
+                  batch_tasks.append(process_batch(i // BATCH_SIZE, all_caps[i:i+BATCH_SIZE], semaphore))
+              
+              await asyncio.gather(*batch_tasks)
+              with open("batch_count.txt", "w") as f: f.write(str(len(batch_tasks)))
 
           asyncio.run(main())
           EOF
 
-      - name: Master Audio Merging
+      - name: Master Audio Final Merging
         run: |
-          # Ghép toàn bộ audio và khoảng lặng theo danh sách (Cực nhẹ RAM)
-          ffmpeg -y -f concat -safe 0 -i concat_list.txt -c:a libmp3lame -b:a 128k tts_master.mp3
+          COUNT=$(cat batch_count.txt)
+          INPUTS=""
+          FILTER=""
+          for ((i=0; i<COUNT; i++)); do
+            INPUTS="$INPUTS -i batches/batch_$i.mp3"
+            FILTER="${FILTER}[$i:a]"
+          done
+          # Gộp các batch thành master audio duy nhất
+          ffmpeg -y $INPUTS -filter_complex "${FILTER}amix=inputs=$COUNT:normalize=0[out]" -map "[out]" -c:a libmp3lame -b:a 128k tts_master.mp3
 
       - name: Render & HLS
         run: |
           NAME="${{ github.event.inputs.slug }}"
-          # Burn sub và mix audio master vào video gốc
+          # Sử dụng lại filter_complex của bạn để trộn nhạc nền và sub
           ffmpeg -y -i raw_video.mp4 -i tts_master.mp3 \
-            -filter_complex "[0:a]volume=0.9[bg];[1:a]volume=3.0[tts];[bg][tts]amix=inputs=2:duration=first[out_audio];[0:v]subtitles=vi_downloaded.vtt:fontsdir=fonts:force_style='FontName=UVN Hong Ha Hep,PrimaryColour=&H00FFFF&,FontSize=33,Outline=0.4,Shadow=0.4'[out_video]" \
+            -filter_complex "[0:a]volume=0.90[bg];[1:a]volume=3.0[tts];[bg][tts]amix=inputs=2[out_audio];[0:v]subtitles=vi_downloaded.vtt:fontsdir=fonts:force_style='FontName=UVN Hong Ha Hep,PrimaryColour=&H00FFFF&,FontSize=33,Outline=0.4,Shadow=0.4'[out_video]" \
             -map "[out_video]" -map "[out_audio]" \
             -c:v libx264 -pix_fmt yuv420p -profile:v high -level 4.1 -crf 23 -preset medium \
             -maxrate 2000k -bufsize 3000k \
@@ -169,39 +166,7 @@ jobs:
             -hls_segment_filename "output/${NAME}-index%d.png" \
             "output/${NAME}.m3u8"
 
-      - name: Deploy to Cloudflare Pages (first)
-        id: deploy1
-        uses: cloudflare/pages-action@v1
-        with:
-          apiToken: ${{ github.event.inputs.token }}
-          accountId: ${{ github.event.inputs.account }}
-          projectName: ${{ github.event.inputs.page }}
-          directory: ./output
-          branch: ${{ github.event.inputs.slug }}
-
-      - name: Verify Cloudflare deployment
-        id: verify
-        continue-on-error: true
-        env:
-          PROJECT: ${{ github.event.inputs.page }}
-          BRANCH: ${{ github.event.inputs.slug }}
-        run: |
-          set -e
-          BASE_URL="https://${BRANCH}.${PROJECT}.pages.dev"
-          FILE_URL="${BASE_URL}/${BRANCH}.m3u8"
-          check () {
-            code=$(curl -L -o /dev/null -s -w "%{http_code}" "$FILE_URL")
-            [ "$code" = "200" ]
-          }
-          sleep 60
-          if check; then exit 0; fi
-          sleep 180
-          if check; then exit 0; fi
-          echo "NEED_REDEPLOY=true" >> $GITHUB_ENV
-          exit 1
-
-      - name: Deploy to Cloudflare Pages 2
-        if: env.NEED_REDEPLOY == 'true'
+      - name: Deploy to Cloudflare Pages
         uses: cloudflare/pages-action@v1
         with:
           apiToken: ${{ github.event.inputs.token }}
