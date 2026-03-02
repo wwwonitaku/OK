@@ -24,7 +24,7 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install -U yt-dlp webvtt-py requests edge-tts
 
-      - name: Setup Subtitle Font (Oswald)
+      - name: Setup Subtitle Font
         run: |
           mkdir -p fonts
           curl -L https://github.com/wwwonitaku/Linux/raw/main/UVNHongHaHep_B.TTF -o fonts/UVNHongHaHep_B.TTF
@@ -32,103 +32,93 @@ jobs:
 
       - name: Download Video & Subtitle
         run: |
-          # Tải video gốc
           yt-dlp \
             --hls-prefer-native \
             --concurrent-fragments 5 \
             --retries infinite \
             --fragment-retries infinite \
-            --retry-sleep 5 \
             -o "raw_video.mp4" \
             "${{ github.event.inputs.link }}"
           
-          # Tải sub Việt (Mặc định đã có sẵn trên server)
           curl -L "https://vicdn.cc/vtt/${{ github.event.inputs.slug }}-vi.vtt" -o vi.vtt
+          # Trích xuất audio gốc để mix cho nhanh
           ffmpeg -i raw_video.mp4 -vn -ac 2 bg_audio.wav
-      - name: AI Translate + TTS (Fixed Stability)
+
+      - name: AI Translate + TTS
         run: |
           python3 <<'EOF'
-          import webvtt, os, time, re, asyncio, edge_tts, subprocess
+          import webvtt, os, asyncio, edge_tts, re, subprocess
 
           async def generate_tts(text, out, idx, semaphore):
               async with semaphore:
                   try:
-                      # Giữ nguyên normalize và rate +28% của code gốc
                       t = text.lower()
                       t = re.sub(r'\s+', ' ', t).strip()
                       t = t.replace(",", ", ").replace(".", ". ").replace("?", "? ").replace("!", "! ")
                       if not t.endswith((".", "!", "?", "...")): t += "."
-                      
                       tts = edge_tts.Communicate(t, voice="vi-VN-HoaiMyNeural", rate="+28%")
                       await tts.save(out)
-                      print(f"[TTS OK] #{idx:05d}") # Index dạng 00001
+                      if idx % 100 == 0: print(f"[TTS OK] #{idx:05d}")
                   except:
-                      # Nếu lỗi tạo file lặng để ko lệch timeline
                       subprocess.run(["ffmpeg","-y","-f","lavfi","-i","anullsrc=r=24000:cl=mono","-t","0.1",out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
           async def main():
             if not os.path.exists("vi.vtt"): return
             vtt = webvtt.read("vi.vtt")
             os.makedirs("chunks", exist_ok=True)
-            semaphore = asyncio.Semaphore(5)
-            tasks = []
-            for i, c in enumerate(vtt):
-                # Lưu file dạng c_00000.mp3 để sắp xếp chuẩn
-                tasks.append(generate_tts(c.text, f"chunks/c_{i:05d}.mp3", i, semaphore))
+            semaphore = asyncio.Semaphore(10)
+            tasks = [generate_tts(c.text, f"chunks/c_{i:05d}.mp3", i, semaphore) for i, c in enumerate(vtt)]
             await asyncio.gather(*tasks)
-            with open("count.txt", "w") as f: f.write(str(len(vtt)))
-
+          
           asyncio.run(main())
           EOF
 
-      - name: Separate Audio Processing (Batches of 500)
+      - name: Professional Audio Mixing (No Ghosting)
         run: |
           python3 <<'EOF'
-          import webvtt, subprocess, os
+          import webvtt, subprocess, os, time
+
+          def run_ffmpeg_smart_log(cmd, desc):
+              print(f"--- {desc} Starting ---")
+              process = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True, encoding='utf-8')
+              last_log = time.time()
+              while True:
+                  line = process.stderr.readline()
+                  if not line and process.poll() is not None: break
+                  if line and (time.time() - last_log > 30):
+                      print(f"[{desc} Progress] {line.strip()}")
+                      last_log = time.time()
+              process.wait()
+              if process.returncode == 0: print(f"--- {desc} Done ---")
+              else: raise Exception(f"{desc} Failed")
 
           vtt = webvtt.read("vi.vtt")
-          total = len(vtt)
-          batch_size = 100
-          batch_files = []
-
-          for b in range(0, total, batch_size):
-              batch_idx = b // batch_size
-              current_batch = vtt[b : b + batch_size]
-              
-              inputs = []
-              filter_parts = []
-              
-              for i, c in enumerate(current_batch):
-                  idx = b + i
-                  # Chuyển timeline VTT sang ms chính xác
-                  h, m, s = c.start.replace(',', '.').split(':')
-                  ms = int(float(h)*3600000 + float(m)*60000 + float(s)*1000) + 500
-                  
-                  inputs.extend(["-i", f"chunks/c_{idx:05d}.mp3"])
-                  filter_parts.append(f"[{i}:a]adelay={ms}|{ms}[a{i}];")
-              
-              filter_str = "".join(filter_parts)
-              filter_str += "".join(f"[a{i}]" for i in range(len(current_batch)))
-              filter_str += f"amix=inputs={len(current_batch)}:normalize=0,volume=3.0[out]"
-              
-              out_name = f"batch_{batch_idx}.wav"
-              subprocess.run(["ffmpeg", "-y"] + inputs + ["-filter_complex", filter_str, "-map", "[out]", out_name])
-              batch_files.append(out_name)
-
-          # Trộn các batch và mix vào nhạc nền video gốc
-          final_mix_filter = "".join(f"[{i+1}:a]" for i in range(len(batch_files)))
-          final_mix_filter += f"amix=inputs={len(batch_files)}:normalize=0[tts];"
-          final_mix_filter += "[0:a]volume=0.90[bg];[bg][tts]amix=inputs=2[out_a]"
+          inputs = ["-i", "bg_audio.wav"]
+          filter_parts = []
           
-          cmd = ["ffmpeg", "-y", "-i", "bg_audio.wav"]
-          for bf in batch_files: cmd.extend(["-i", bf])
-          cmd.extend(["-filter_complex", final_mix_filter, "-map", "[out_a]", "-c:a", "aac", "-b:a", "96k", "final_audio.aac"])
-          subprocess.run(cmd)
+          # Tạo filter script để tránh quá tải Shell
+          for i, c in enumerate(vtt):
+              h, m, s = c.start.replace(',', '.').split(':')
+              ms = int(float(h)*3600000 + float(m)*60000 + float(s)*1000) + 500
+              inputs.extend(["-i", f"chunks/c_{i:05d}.mp3"])
+              # [i+1] vì index 0 là bg_audio.wav
+              filter_parts.append(f"[{i+1}:a]adelay={ms}|{ms}[a{i}];")
+          
+          mix_inputs = "".join(f"[a{i}]" for i in range(len(vtt)))
+          filter_script = "".join(filter_parts) + \
+                          f"{mix_inputs}amix=inputs={len(vtt)}:normalize=0,volume=3.0[tts];" + \
+                          "[0:a]volume=0.90[bg];[bg][tts]amix=inputs=2[out_a]"
+          
+          with open("main_audio_filter.txt", "w") as f:
+              f.write(filter_script)
+
+          # Gọi FFmpeg 1 lần duy nhất bằng list để tránh giới hạn shell
+          cmd = ["ffmpeg", "-y"] + inputs + ["-filter_complex_script", "main_audio_filter.txt", "-map", "[out_a]", "-c:a", "aac", "-b:a", "96k", "final_audio.aac"]
+          run_ffmpeg_smart_log(cmd, "Final Audio Mixing")
           EOF
 
       - name: Render Video Hardsub (Perfect 5s)
         run: |
-          # Ép -r 24 và -g 120 để đảm bảo keyframe đúng mỗi 5 giây (24*5=120)
           ffmpeg -y -i raw_video.mp4 -i final_audio.aac \
             -vf "subtitles=vi.vtt:fontsdir=fonts:force_style='FontName=UVN Hong Ha Hep,PrimaryColour=&H00FFFF&,FontSize=30,Outline=0.4,Shadow=0.4'" \
             -map 0:v -map 1:a \
@@ -140,7 +130,6 @@ jobs:
       - name: Generate HLS
         run: |
           mkdir -p output
-          # Dùng copy vì video đã được force keyframe chuẩn ở bước trên
           ffmpeg -i final.mp4 -c copy -f hls \
             -hls_time 5 -hls_list_size 0 -start_number 10001 -hls_playlist_type vod \
             -hls_segment_type fmp4 \
@@ -174,11 +163,7 @@ jobs:
             [ "$code" = "200" ]
           }
           sleep 60
-          if check; then exit 0; fi
-          sleep 180
-          if check; then exit 0; fi
-          echo "NEED_REDEPLOY=true" >> $GITHUB_ENV
-          exit 1
+          check || (sleep 180 && check) || (echo "NEED_REDEPLOY=true" >> $GITHUB_ENV && exit 1)
 
       - name: Deploy to Cloudflare Pages 2
         if: env.NEED_REDEPLOY == 'true'
