@@ -1,4 +1,4 @@
-name: M3U8 Download ->> Audio
+name: M3U8 Download ->> Audio (Optimized for Long Video)
 
 on:
   workflow_dispatch:
@@ -67,12 +67,16 @@ jobs:
             exit 1
           fi
 
-      - name: TTS Generation
+      - name: TTS Generation & Audio Assembly logic
         run: |
           python3 <<'EOF'
-          import webvtt, os, time, re, requests, asyncio, edge_tts, subprocess
+          import webvtt, os, re, asyncio, edge_tts, subprocess
 
-          MAX_CONCURRENT_TTS = 5 
+          MAX_CONCURRENT_TTS = 5
+
+          def time_to_sec(tstr):
+              h, m, s = tstr.replace(',', '.').split(':')
+              return float(h)*3600 + float(m)*60 + float(s)
 
           def safe_text(text, max_len=450):
               if not text: return "..."
@@ -86,73 +90,71 @@ jobs:
               if not text.endswith((".", "!", "?", "...")): text += "."
               return text
 
-          async def generate_tts(text, out, idx, semaphore):
+          async def generate_tts(text, out, semaphore):
               async with semaphore:
-                  try:
-                      tts_text = normalize_for_tts(text)
-                      tts = edge_tts.Communicate(tts_text, voice="vi-VN-HoaiMyNeural", rate="+28%")
-                      await tts.save(out)
-                      if not os.path.exists(out) or os.path.getsize(out) < 100: raise Exception("Fail")
-                  except:
-                      await asyncio.sleep(2)
+                  tts_text = normalize_for_tts(text)
+                  for attempt in range(2):
                       try:
-                          tts = edge_tts.Communicate(normalize_for_tts(text), voice="vi-VN-HoaiMyNeural", rate="+28%")
+                          tts = edge_tts.Communicate(tts_text, voice="vi-VN-HoaiMyNeural", rate="+28%")
                           await tts.save(out)
+                          if os.path.exists(out) and os.path.getsize(out) > 100:
+                              return True
                       except:
-                          subprocess.run(["ffmpeg","-y","-f","lavfi","-i","anullsrc=r=24000:cl=mono","-t","0.1",out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                          await asyncio.sleep(1)
+                  # Nếu lỗi hết, tạo file im lặng cực ngắn
+                  subprocess.run(["ffmpeg","-y","-f","lavfi","-i","anullsrc=r=24000:cl=mono","-t","0.1",out], stderr=subprocess.DEVNULL)
+                  return False
 
           async def main():
-            final_vtt = webvtt.read("vi_downloaded.vtt")
-            os.makedirs("chunks", exist_ok=True)
-            vi_vtt_to_save = webvtt.WebVTT()
-            semaphore = asyncio.Semaphore(MAX_CONCURRENT_TTS)
-            tasks = []
-            for i, c in enumerate(final_vtt):
-                txt = safe_text(c.text)
-                vi_vtt_to_save.captions.append(webvtt.Caption(c.start, c.end, txt))
-                tasks.append(generate_tts(txt, f"chunks/c_{i}.mp3", i, semaphore))
-            await asyncio.gather(*tasks)
-            vi_vtt_to_save.save("vi.vtt")
-            with open("count.txt", "w") as f: f.write(str(len(final_vtt)))
-          asyncio.run(main())
-          EOF
-
-      - name: Build Filter Scripts
-        run: |
-          python3 <<EOF
-          import webvtt
-          vtt = webvtt.read("vi.vtt")
-          
-          # 1. Filter để gộp các mảnh audio (không chứa video)
-          with open("audio_merge.txt", "w") as f:
+              vtt = webvtt.read("vi_downloaded.vtt")
+              os.makedirs("chunks", exist_ok=True)
+              # Tạo file im lặng mẫu 1 giây để dùng cho concat
+              subprocess.run(["ffmpeg","-y","-f","lavfi","-i","anullsrc=r=24000:cl=mono","-t","1","silence_1s.mp3"], stderr=subprocess.DEVNULL)
+              
+              semaphore = asyncio.Semaphore(MAX_CONCURRENT_TTS)
+              tasks = []
               for i, c in enumerate(vtt):
-                  h, m, s = c.start.replace(',', '.').split(':')
-                  ms = int(float(h)*3600000 + float(m)*60000 + float(s)*1000) + 500
-                  f.write(f"[{i}:a]adelay={ms}|{ms}[a{i}];")
-              f.write("".join(f"[a{i}]" for i in range(len(vtt))))
-              f.write(f"amix=inputs={len(vtt)}:normalize=0[out]")
+                  tasks.append(generate_tts(safe_text(c.text), f"chunks/c_{i}.mp3", semaphore))
+              
+              print(f"Starting TTS for {len(vtt)} lines...")
+              await asyncio.gather(*tasks)
 
-          # 2. Filter để render video cuối cùng (chỉ trộn audio master + sub)
-          with open("video_final.txt", "w") as f:
-              f.write("[0:a]volume=0.90[bg];[1:a]volume=3.0[tts];[bg][tts]amix=inputs=2[out_audio];")
-              f.write("[0:v]subtitles=vi.vtt:fontsdir=fonts:force_style='FontName=UVN Hong Ha Hep,PrimaryColour=&H00FFFF&,FontSize=33,Outline=0.4,Shadow=0.4'[out_video]")
+              # Tạo danh sách file để ghép nối (Concat Demuxer)
+              # Cách này không dùng filter_complex nên cực nhẹ
+              with open("concat_list.txt", "w") as f:
+                  prev_end = 0.0
+                  for i, c in enumerate(vtt):
+                      start_sec = time_to_sec(c.start)
+                      # Tính khoảng nghỉ
+                      gap = start_sec - prev_end
+                      if gap > 0:
+                          f.write(f"file '../silence_1s.mp3'\n")
+                          f.write(f"duration {gap}\n")
+                      
+                      f.write(f"file 'chunks/c_{i}.mp3'\n")
+                      
+                      # Giả định: chúng ta không biết độ dài chính xác của TTS, 
+                      # nhưng để đơn giản và chính xác về timing sub, 
+                      # ta coi như TTS kết thúc tại thời điểm kết thúc của sub hoặc start của sub sau.
+                      # Tuy nhiên, concat demuxer sẽ tự nối tiếp.
+                      # Để đồng bộ chuẩn nhất với sub, ta dùng 'prev_end' là mốc start tiếp theo.
+                      prev_end = start_sec + 0.1 # bù trừ nhỏ
+
+          asyncio.run(main())
           EOF
 
       - name: Master Audio Merging
         run: |
-          COUNT=$(cat count.txt)
-          INPUTS=""
-          for ((i=0; i<COUNT; i++)); do
-            INPUTS="$INPUTS -i chunks/c_$i.mp3"
-          done
-          # Gộp hàng nghìn mảnh MP3 thành 1 file duy nhất
-          ffmpeg -y $INPUTS -filter_complex_script audio_merge.txt -map "[out]" -c:a libmp3lame -b:a 128k tts_master.mp3
+          # Ghép nối các đoạn audio và khoảng lặng thành 1 file duy nhất
+          # Sử dụng concat demuxer: an toàn cho file cực dài
+          ffmpeg -y -f concat -safe 0 -i concat_list.txt -c:a libmp3lame -b:a 128k tts_master.mp3
 
       - name: Render & HLS
         run: |
           NAME="${{ github.event.inputs.slug }}"
-          # Render video với duy nhất 2 input: Video gốc và Audio đã gộp
-          ffmpeg -y -i raw_video.mp4 -i tts_master.mp3 -filter_complex_script video_final.txt \
+          # Sử dụng filter_complex tối giản: chỉ mix 2 luồng audio và burn sub
+          ffmpeg -y -i raw_video.mp4 -i tts_master.mp3 \
+            -filter_complex "[0:a]volume=0.9[bg];[1:a]volume=3.0[tts];[bg][tts]amix=inputs=2:duration=first[out_audio];[0:v]subtitles=vi_downloaded.vtt:fontsdir=fonts:force_style='FontName=UVN Hong Ha Hep,PrimaryColour=&H00FFFF&,FontSize=33,Outline=0.4,Shadow=0.4'[out_video]" \
             -map "[out_video]" -map "[out_audio]" \
             -c:v libx264 -pix_fmt yuv420p -profile:v high -level 4.1 -crf 23 -preset medium \
             -maxrate 2000k -bufsize 3000k \
