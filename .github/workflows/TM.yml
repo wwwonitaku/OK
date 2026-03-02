@@ -1,4 +1,4 @@
-name: AHiHi
+name: M3U8 ->> Audio
 
 on:
   workflow_dispatch:
