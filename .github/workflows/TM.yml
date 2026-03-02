@@ -1,4 +1,4 @@
-name: M3U8 Download ->> Audio (Optimized for Long Video)
+name: M3U8 Download ->> Audio (Long Video Fixed)
 
 on:
   workflow_dispatch:
@@ -67,7 +67,7 @@ jobs:
             exit 1
           fi
 
-      - name: TTS Generation & Audio Assembly logic
+      - name: TTS Generation & List Creation
         run: |
           python3 <<'EOF'
           import webvtt, os, re, asyncio, edge_tts, subprocess
@@ -75,6 +75,7 @@ jobs:
           MAX_CONCURRENT_TTS = 5
 
           def time_to_sec(tstr):
+              # Chuyển 00:00:00.000 sang giây
               h, m, s = tstr.replace(',', '.').split(':')
               return float(h)*3600 + float(m)*60 + float(s)
 
@@ -100,16 +101,18 @@ jobs:
                           if os.path.exists(out) and os.path.getsize(out) > 100:
                               return True
                       except:
-                          await asyncio.sleep(1)
-                  # Nếu lỗi hết, tạo file im lặng cực ngắn
+                          await asyncio.sleep(2)
+                  # Nếu lỗi, tạo file im lặng 0.1s làm placeholder
                   subprocess.run(["ffmpeg","-y","-f","lavfi","-i","anullsrc=r=24000:cl=mono","-t","0.1",out], stderr=subprocess.DEVNULL)
                   return False
 
           async def main():
               vtt = webvtt.read("vi_downloaded.vtt")
               os.makedirs("chunks", exist_ok=True)
-              # Tạo file im lặng mẫu 1 giây để dùng cho concat
+              
+              # Tạo file im lặng gốc
               subprocess.run(["ffmpeg","-y","-f","lavfi","-i","anullsrc=r=24000:cl=mono","-t","1","silence_1s.mp3"], stderr=subprocess.DEVNULL)
+              silence_path = os.path.abspath("silence_1s.mp3")
               
               semaphore = asyncio.Semaphore(MAX_CONCURRENT_TTS)
               tasks = []
@@ -119,40 +122,37 @@ jobs:
               print(f"Starting TTS for {len(vtt)} lines...")
               await asyncio.gather(*tasks)
 
-              # Tạo danh sách file để ghép nối (Concat Demuxer)
-              # Cách này không dùng filter_complex nên cực nhẹ
+              # Ghi file concat_list với đường dẫn tuyệt đối
               with open("concat_list.txt", "w") as f:
                   prev_end = 0.0
                   for i, c in enumerate(vtt):
                       start_sec = time_to_sec(c.start)
-                      # Tính khoảng nghỉ
                       gap = start_sec - prev_end
+                      
                       if gap > 0:
-                          f.write(f"file '../silence_1s.mp3'\n")
+                          f.write(f"file '{silence_path}'\n")
                           f.write(f"duration {gap}\n")
                       
-                      f.write(f"file 'chunks/c_{i}.mp3'\n")
+                      chunk_path = os.path.abspath(f"chunks/c_{i}.mp3")
+                      f.write(f"file '{chunk_path}'\n")
                       
-                      # Giả định: chúng ta không biết độ dài chính xác của TTS, 
-                      # nhưng để đơn giản và chính xác về timing sub, 
-                      # ta coi như TTS kết thúc tại thời điểm kết thúc của sub hoặc start của sub sau.
-                      # Tuy nhiên, concat demuxer sẽ tự nối tiếp.
-                      # Để đồng bộ chuẩn nhất với sub, ta dùng 'prev_end' là mốc start tiếp theo.
-                      prev_end = start_sec + 0.1 # bù trừ nhỏ
+                      # Ước tính thời điểm kết thúc câu tiếp theo
+                      # Lưu ý: Concat demuxer sẽ tự nối tiếp, 
+                      # chúng ta chỉ cần chèn gap giữa các điểm bắt đầu.
+                      prev_end = start_sec + 0.05 # Một khoảng bù siêu nhỏ
 
           asyncio.run(main())
           EOF
 
       - name: Master Audio Merging
         run: |
-          # Ghép nối các đoạn audio và khoảng lặng thành 1 file duy nhất
-          # Sử dụng concat demuxer: an toàn cho file cực dài
+          # Ghép toàn bộ audio và khoảng lặng theo danh sách (Cực nhẹ RAM)
           ffmpeg -y -f concat -safe 0 -i concat_list.txt -c:a libmp3lame -b:a 128k tts_master.mp3
 
       - name: Render & HLS
         run: |
           NAME="${{ github.event.inputs.slug }}"
-          # Sử dụng filter_complex tối giản: chỉ mix 2 luồng audio và burn sub
+          # Burn sub và mix audio master vào video gốc
           ffmpeg -y -i raw_video.mp4 -i tts_master.mp3 \
             -filter_complex "[0:a]volume=0.9[bg];[1:a]volume=3.0[tts];[bg][tts]amix=inputs=2:duration=first[out_audio];[0:v]subtitles=vi_downloaded.vtt:fontsdir=fonts:force_style='FontName=UVN Hong Ha Hep,PrimaryColour=&H00FFFF&,FontSize=33,Outline=0.4,Shadow=0.4'[out_video]" \
             -map "[out_video]" -map "[out_audio]" \
