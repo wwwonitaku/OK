@@ -120,7 +120,7 @@ jobs:
           final_mix_filter += f"amix=inputs={len(batch_files)}:normalize=0[tts];"
           final_mix_filter += "[0:a]volume=0.90[bg];[bg][tts]amix=inputs=2[out_a]"
           
-          cmd = ["ffmpeg", "-y", "-i", "bg_audio.mp4"]
+          cmd = ["ffmpeg", "-y", "-i", "bg_audio.wav"]
           for bf in batch_files: cmd.extend(["-i", bf])
           cmd.extend(["-filter_complex", final_mix_filter, "-map", "[out_a]", "-c:a", "aac", "-b:a", "96k", "final_audio.aac"])
           subprocess.run(cmd)
