@@ -154,7 +154,6 @@ jobs:
           # Render video với duy nhất 2 input: Video gốc và Audio đã gộp
           ffmpeg -y -i raw_video.mp4 -i tts_master.mp3 -filter_complex_script video_final.txt \
             -map "[out_video]" -map "[out_audio]" \
-            -vf "scale='if(gt(iw,1920),1920,if(gt(ih,1080),-2,iw))':'if(gt(ih,1080),1080,if(gt(iw,1920),-2,ih))',format=yuv420p" \
             -c:v libx264 -pix_fmt yuv420p -profile:v high -level 4.1 -crf 23 -preset medium \
             -maxrate 2000k -bufsize 3000k \
             -force_key_frames "expr:gte(t,n_forced*5)" -sc_threshold 0 \
