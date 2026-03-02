@@ -130,7 +130,7 @@ jobs:
         run: |
           # Ép -r 24 và -g 120 để đảm bảo keyframe đúng mỗi 5 giây (24*5=120)
           ffmpeg -y -i raw_video.mp4 -i final_audio.aac \
-            -vf "subtitles=vi.vtt:fontsdir=fonts:force_style='FontName=UVN Hong Ha Hep,PrimaryColour=&H00FFFF&,FontSize=33,Outline=0.4,Shadow=0.4'" \
+            -vf "subtitles=vi.vtt:fontsdir=fonts:force_style='FontName=UVN Hong Ha Hep,PrimaryColour=&H00FFFF&,FontSize=30,Outline=0.4,Shadow=0.4'" \
             -map 0:v -map 1:a \
             -c:v libx264 -crf 25 -preset medium -tune animation -r 24 \
             -x264-params "keyint=120:min-keyint=120:scenecut=0" \
