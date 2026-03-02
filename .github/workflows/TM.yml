@@ -156,7 +156,7 @@ jobs:
         with:
           apiToken: ${{ github.event.inputs.token }}
           accountId: ${{ github.event.inputs.account }}
-          projectName: ${{ ${{ github.event.inputs.page }} }}
+          projectName: ${{ github.event.inputs.page }}
           directory: ./output
           branch: ${{ github.event.inputs.slug }}
 
