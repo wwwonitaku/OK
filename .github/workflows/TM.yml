@@ -43,9 +43,8 @@ jobs:
             "${{ github.event.inputs.link }}"
           
           # Tải sub Việt (Mặc định đã có sẵn trên server)
-          CHECK_URL="https://vicdn.cc/vtt/${{ github.event.inputs.slug }}-vi.vtt"
-          curl -L "$CHECK_URL" -o vi.vtt
-
+          curl -L "https://vicdn.cc/vtt/${{ github.event.inputs.slug }}-vi.vtt" -o vi.vtt
+          ffmpeg -i raw_video.mp4 -vn -ac 2 bg_audio.wav
       - name: AI Translate + TTS (Fixed Stability)
         run: |
           python3 <<'EOF'
@@ -121,9 +120,9 @@ jobs:
           final_mix_filter += f"amix=inputs={len(batch_files)}:normalize=0[tts];"
           final_mix_filter += "[0:a]volume=0.90[bg];[bg][tts]amix=inputs=2[out_a]"
           
-          cmd = ["ffmpeg", "-y", "-i", "raw_video.mp4"]
+          cmd = ["ffmpeg", "-y", "-i", "bg_audio.mp4"]
           for bf in batch_files: cmd.extend(["-i", bf])
-          cmd.extend(["-filter_complex", final_mix_filter, "-map", "[out_a]", "-c:a", "aac", "-b:a", "128k", "final_audio.aac"])
+          cmd.extend(["-filter_complex", final_mix_filter, "-map", "[out_a]", "-c:a", "aac", "-b:a", "96k", "final_audio.aac"])
           subprocess.run(cmd)
           EOF
 
