@@ -89,7 +89,7 @@ jobs:
 
           vtt = webvtt.read("vi.vtt")
           total = len(vtt)
-          batch_size = 500
+          batch_size = 1000
           batch_files = []
 
           for b in range(0, total, batch_size):
@@ -135,7 +135,7 @@ jobs:
             -map 0:v -map 1:a \
             -c:v libx264 -crf 25 -preset medium -tune animation -r 24 \
             -x264-params "keyint=120:min-keyint=120:scenecut=0" \
-            -pix_fmt yuv420p -maxrate 1800k -bufsize 3000k \
+            -pix_fmt yuv420p -maxrate 2000k -bufsize 3000k \
             -c:a copy -threads 0 final.mp4
 
       - name: Generate HLS
