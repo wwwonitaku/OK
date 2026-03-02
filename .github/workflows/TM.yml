@@ -88,7 +88,7 @@ jobs:
 
           vtt = webvtt.read("vi.vtt")
           total = len(vtt)
-          batch_size = 500
+          batch_size = 100
           batch_files = []
 
           for b in range(0, total, batch_size):
