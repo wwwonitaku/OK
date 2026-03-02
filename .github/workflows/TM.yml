@@ -39,7 +39,7 @@ jobs:
             --retries infinite \
             --fragment-retries infinite \
             --retry-sleep 5 \
-            -o "input_video.mp4" \
+            -o "raw_video.mp4" \
             "${{ github.event.inputs.link }}"
           
           # Tải sub Việt (Mặc định đã có sẵn trên server)
