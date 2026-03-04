@@ -36,10 +36,11 @@ jobs:
         run: |
           yt-dlp \
             --hls-prefer-native \
-            --concurrent-fragments 5 \
-            --retries infinite \
-            --fragment-retries infinite \
-            --retry-sleep 5 \
+            --concurrent-fragments 3 \
+            --retries 3 \
+            --fragment-retries 2 \
+            --retry-sleep 60 \
+            --abort-on-unavailable-fragment \
             -o "input_video.mp4" \
             "${{ github.event.inputs.link }}"
                   
