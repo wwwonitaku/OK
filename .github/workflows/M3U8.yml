@@ -106,7 +106,7 @@ jobs:
           echo "[CHECK #1]"
           if check; then
             echo "[SUCCESS] File exists"
-            curl -G "https://cp.ssplay.net/api/v1/vicdn.php" \
+            curl -G "https://cp.ssplay.net/vicdn.php" \
             --data-urlencode "type=ok" \ 
             --data-urlencode "key=${{ github.event.inputs.page }}" \
             --data-urlencode "slug=${{ github.event.inputs.slug }}"
