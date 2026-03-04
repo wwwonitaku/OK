@@ -35,7 +35,6 @@ jobs:
       - name: Download Video from m3u8 Link
         run: |
           yt-dlp \
-            --hls-prefer-native \
             --concurrent-fragments 3 \
             --retries 3 \
             --fragment-retries 2 \
