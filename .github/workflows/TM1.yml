@@ -1,4 +1,4 @@
-name: M3U8 -> Audio (Remux & Fast Mix)
+name: M3U8 -> Audio (Strict TTS Overlay)
 
 on:
   workflow_dispatch:
@@ -35,10 +35,8 @@ jobs:
             "${{ github.event.inputs.link }}"
           
           curl -L "https://vicdn.cc/vtt/${{ github.event.inputs.slug }}-vi.vtt" -o vi.vtt
-          # Trích xuất audio gốc để mix
-          ffmpeg -i raw_video.mp4 -vn -ac 2 bg_audio.wav
 
-      - name: AI Translate + TTS
+      - name: AI TTS Generation
         run: |
           python3 <<'EOF'
           import webvtt, os, asyncio, edge_tts, re, subprocess
@@ -48,12 +46,10 @@ jobs:
                   try:
                       t = re.sub(r'\s+', ' ', text).strip()
                       if not t: t = "."
-                      # Tốc độ +28% như cũ
                       tts = edge_tts.Communicate(t, voice="vi-VN-HoaiMyNeural", rate="+28%")
                       await tts.save(out)
-                      if idx % 100 == 0: print(f"[TTS OK] #{idx:05d}")
                   except:
-                      # Nếu lỗi tạo 0.1s im lặng để giữ sync
+                      # Tạo file im lặng nếu lỗi để không làm lệch trình tự
                       subprocess.run(["ffmpeg","-y","-f","lavfi","-i","anullsrc=r=24000:cl=mono","-t","0.1",out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
           async def main():
@@ -67,46 +63,64 @@ jobs:
           asyncio.run(main())
           EOF
 
-      - name: Professional Audio Mixing (No Ghosting)
+      - name: Create TTS Layer (Batch 100 - No BG Processing)
         run: |
           python3 <<'EOF'
           import webvtt, subprocess, os
 
           vtt = webvtt.read("vi.vtt")
-          inputs = ["-i", "bg_audio.wav"]
-          filter_parts = []
-          
-          for i, c in enumerate(vtt):
-              h, m, s = c.start.replace(',', '.').split(':')
-              ms = int(float(h)*3600000 + float(m)*60000 + float(s)*1000)
-              
-              audio_file = f"chunks/c_{i:05d}.mp3"
-              if os.path.exists(audio_file):
-                  inputs.extend(["-i", audio_file])
-                  # adelay giúp đặt audio đúng vị trí timestamp mà không bị đè lộn xộn
-                  # index i+1 vì index 0 là bg_audio
-                  filter_parts.append(f"[{len(inputs)-1}:a]adelay={ms}|{ms}[a{i}];")
-          
-          if filter_parts:
-              mix_inputs = "".join(f"[a{i}]" for i in range(len(filter_parts)))
-              # amix với normalize=0 để giữ nguyên âm lượng TTS không bị nhỏ dần khi nhiều track
-              filter_script = "".join(filter_parts) + \
-                              f"{mix_inputs}amix=inputs={len(filter_parts)}:normalize=0,volume=3.0[tts];" + \
-                              "[0:a]volume=0.85[bg];[bg][tts]amix=inputs=2:duration=first[out_a]"
-              
-              with open("main_audio_filter.txt", "w") as f:
-                  f.write(filter_script)
+          batch_size = 100
+          partial_files = []
 
-              cmd = ["ffmpeg", "-y"] + inputs + ["-filter_complex_script", "main_audio_filter.txt", "-map", "[out_a]", "-c:a", "aac", "-b:a", "128k", "final_audio.m4a"]
-              subprocess.run(cmd, check=True)
+          # Bước 1: Trộn các câu TTS thành các file wav tạm (đúng timeline)
+          for b_idx in range(0, len(vtt), batch_size):
+              batch = vtt[b_idx : b_idx + batch_size]
+              inputs = []
+              filter_parts = []
+              
+              for i, c in enumerate(batch):
+                  h, m, s = c.start.replace(',', '.').split(':')
+                  ms = int(float(h)*3600000 + float(m)*60000 + float(s)*1000)
+                  
+                  real_idx = b_idx + i
+                  audio_file = f"chunks/c_{real_idx:05d}.mp3"
+                  
+                  if os.path.exists(audio_file):
+                      inputs.extend(["-i", audio_file])
+                      idx_in_batch = len(inputs) - 1
+                      # adelay đặt TTS vào đúng mili giây của timeline
+                      filter_parts.append(f"[{idx_in_batch}:a]adelay={ms}|{ms}[a{idx_in_batch}];")
+              
+              if inputs:
+                  mix_tags = "".join([f"[a{k}]" for k in range(len(inputs))])
+                  # normalize=0 để giữ nguyên âm lượng gốc của TTS
+                  filter_script = "".join(filter_parts) + f"{mix_tags}amix=inputs={len(inputs)}:normalize=0[out]"
+                  
+                  out_name = f"tts_layer_{b_idx}.wav"
+                  subprocess.run(["ffmpeg", "-y"] + inputs + ["-filter_complex", filter_script, "-map", "[out]", out_name], check=True)
+                  partial_files.append(out_name)
+
+          # Bước 2: Hợp nhất các lớp TTS thành 1 file duy nhất
+          if partial_files:
+              final_inputs = []
+              for p in partial_files:
+                  final_inputs.extend(["-i", p])
+              
+              mix_batches_tags = "".join([f"[{j}:a]" for j in range(len(partial_files))])
+              final_filter = f"{mix_batches_tags}amix=inputs={len(partial_files)}:normalize=0[tts_final]"
+              
+              subprocess.run(["ffmpeg", "-y"] + final_inputs + ["-filter_complex", final_filter, "-map", "[tts_final]", "all_tts.wav"], check=True)
           EOF
 
-      - name: Remux Video (No Hardsub - giữ nguyên gốc)
+      - name: Final Audio Overlay & Remux
         run: |
-          # Dùng -c:v copy để giữ nguyên stream video gốc, chỉ thay audio. Cực nhanh và nét.
-          ffmpeg -y -i raw_video.mp4 -i final_audio.m4a \
-            -map 0:v:0 -map 1:a:0 \
-            -c:v copy -c:a copy -shortest final.mp4
+          # Trộn all_tts.wav đè lên audio gốc của raw_video.mp4
+          # Giữ nguyên chất lượng video gốc (copy)
+          # amix trộn 2 luồng audio (gốc phim + tts)
+          ffmpeg -y -i raw_video.mp4 -i all_tts.wav \
+            -filter_complex "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0,volume=2.0[out_a]" \
+            -map 0:v:0 -map "[out_a]" \
+            -c:v copy -c:a aac -b:a 128k -shortest final.mp4
 
       - name: Generate HLS
         run: |
