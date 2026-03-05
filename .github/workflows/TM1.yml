@@ -1,4 +1,4 @@
-name: M3U8 -> Audio (Strict TTS & Filter Script Fix)
+name: M3U8 -> Audio (Concat Demuxer Fix)
 
 on:
   workflow_dispatch:
@@ -60,65 +60,49 @@ jobs:
           asyncio.run(main())
           EOF
 
-      - name: Audio Mixing (Using Filter Script - Fix Error 234)
+      - name: Professional TTS Assembly (No Limit Fix)
         run: |
           python3 <<'EOF'
           import webvtt, subprocess, os
 
+          def get_duration(file):
+              cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file]
+              return float(subprocess.check_output(cmd).decode().strip())
+
           vtt = webvtt.read("vi.vtt")
-          batch_size = 50 # Giảm xuống 50 để an toàn tuyệt đối
-          partial_files = []
-
-          for b_idx in range(0, len(vtt), batch_size):
-              batch = vtt[b_idx : b_idx + batch_size]
-              inputs = []
-              filter_lines = []
-              mix_labels = []
+          os.makedirs("silence", exist_ok=True)
+          
+          with open("concat_list.txt", "w") as f:
+              current_time = 0.0
               
-              for i, c in enumerate(batch):
-                  real_idx = b_idx + i
-                  audio_file = f"chunks/c_{real_idx:05d}.mp3"
+              for i, c in enumerate(vtt):
+                  h, m, s = c.start.replace(',', '.').split(':')
+                  start_time = float(h)*3600 + float(m)*60 + float(s)
                   
-                  if os.path.exists(audio_file):
-                      h, m, s = c.start.replace(',', '.').split(':')
-                      ms = int(float(h)*3600000 + float(m)*60000 + float(s)*1000)
-                      
-                      in_idx = len(inputs)
-                      inputs.extend(["-i", audio_file])
-                      filter_lines.append(f"[{in_idx}:a]adelay={ms}|{ms}[a{in_idx}];")
-                      mix_labels.append(f"[a{in_idx}]")
-              
-              if inputs:
-                  # Ghi filter ra file để tránh lỗi Command Line too long
-                  filter_content = "".join(filter_lines) + "".join(mix_labels) + f"amix=inputs={len(mix_labels)}:normalize=0[out]"
-                  filter_filename = f"filter_b{b_idx}.txt"
-                  with open(filter_filename, "w") as f:
-                      f.write(filter_content)
+                  audio_file = f"chunks/c_{i:05d}.mp3"
+                  if not os.path.exists(audio_file): continue
                   
-                  out_name = f"batch_{b_idx}.wav"
-                  cmd = ["ffmpeg", "-y"] + inputs + ["-filter_complex_script", filter_filename, "-map", "[out]", out_name]
-                  subprocess.run(cmd, check=True)
-                  partial_files.append(out_name)
+                  # Tính khoảng trống cần chèn im lặng
+                  gap = start_time - current_time
+                  if gap > 0:
+                      silence_file = f"silence/s_{i}.mp3"
+                      # Tạo file im lặng đúng thời lượng gap
+                      subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo", "-t", str(gap), silence_file], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                      f.write(f"file '{silence_file}'\n")
+                  
+                  f.write(f"file '{audio_file}'\n")
+                  duration = get_duration(audio_file)
+                  current_time = start_time + duration
 
-          # Hợp nhất các batch thành 1 file TTS duy nhất
-          if partial_files:
-              final_inputs = []
-              final_labels = []
-              for idx, p in enumerate(partial_files):
-                  final_inputs.extend(["-i", p])
-                  final_labels.append(f"[{idx}:a]")
-              
-              final_filter_content = "".join(final_labels) + f"amix=inputs={len(partial_files)}:normalize=0[tts_all]"
-              with open("final_tts_filter.txt", "w") as f:
-                  f.write(final_filter_content)
-              
-              subprocess.run(["ffmpeg", "-y"] + final_inputs + ["-filter_complex_script", "final_tts_filter.txt", "-map", "[tts_all]", "all_tts.wav"], check=True)
+          # Nối tất cả lại thành 1 file TTS duy nhất (Cực nhanh và không giới hạn số lượng)
+          subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "concat_list.txt", "-c", "copy", "all_tts.mp3"], check=True)
           EOF
 
       - name: Final Remux (Overlay TTS on Video)
         run: |
-          # Trộn TTS đè lên audio gốc của video. Tăng volume TTS lên để nghe rõ hơn phim.
-          ffmpeg -y -i raw_video.mp4 -i all_tts.wav \
+          # Mix âm thanh gốc của phim với tts (all_tts.mp3)
+          # Tăng volume lớp TTS (2.5) để nghe rõ lời thoại
+          ffmpeg -y -i raw_video.mp4 -i all_tts.mp3 \
             -filter_complex "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0,volume=2.5[out_a]" \
             -map 0:v:0 -map "[out_a]" \
             -c:v copy -c:a aac -b:a 128k -shortest final.mp4
