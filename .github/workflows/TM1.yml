@@ -1,0 +1,176 @@
+name: M3U8 ->> Audio
+
+on:
+  workflow_dispatch:
+    inputs:
+      link: { description: "Link", required: true }
+      slug: { description: "Slug", required: true }
+      token: { description: 'Token', required: true }
+      page: { description: 'Page', required: true }
+      account: { description: 'AID', required: true }
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Setup Environment
+        run: |
+          sudo apt update
+          sudo apt install -y ffmpeg curl jq unzip fontconfig python3 python3-pip
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -U yt-dlp webvtt-py requests edge-tts
+
+      - name: Setup Subtitle Font
+        run: |
+          mkdir -p fonts
+          curl -L https://github.com/wwwonitaku/Linux/raw/main/UVNHongHaHep_B.TTF -o fonts/UVNHongHaHep_B.TTF
+          fc-cache -f fonts
+
+      - name: Download Video & Subtitle
+        run: |
+          yt-dlp \
+            --hls-prefer-native \
+            --concurrent-fragments 5 \
+            --retries infinite \
+            --fragment-retries infinite \
+            -o "raw_video.mp4" \
+            "${{ github.event.inputs.link }}"
+          
+          curl -L "https://vicdn.cc/vtt/${{ github.event.inputs.slug }}-vi.vtt" -o vi.vtt
+          # Trích xuất audio gốc để mix cho nhanh
+          ffmpeg -i raw_video.mp4 -vn -ac 2 bg_audio.wav
+
+      - name: AI Translate + TTS
+        run: |
+          python3 <<'EOF'
+          import webvtt, os, asyncio, edge_tts, re, subprocess
+
+          async def generate_tts(text, out, idx, semaphore):
+              async with semaphore:
+                  try:
+                      t = text.lower()
+                      t = re.sub(r'\s+', ' ', t).strip()
+                      t = t.replace(",", ", ").replace(".", ". ").replace("?", "? ").replace("!", "! ")
+                      if not t.endswith((".", "!", "?", "...")): t += "."
+                      tts = edge_tts.Communicate(t, voice="vi-VN-HoaiMyNeural", rate="+28%")
+                      await tts.save(out)
+                      if idx % 100 == 0: print(f"[TTS OK] #{idx:05d}")
+                  except:
+                      subprocess.run(["ffmpeg","-y","-f","lavfi","-i","anullsrc=r=24000:cl=mono","-t","0.1",out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+          async def main():
+            if not os.path.exists("vi.vtt"): return
+            vtt = webvtt.read("vi.vtt")
+            os.makedirs("chunks", exist_ok=True)
+            semaphore = asyncio.Semaphore(10)
+            tasks = [generate_tts(c.text, f"chunks/c_{i:05d}.mp3", i, semaphore) for i, c in enumerate(vtt)]
+            await asyncio.gather(*tasks)
+          
+          asyncio.run(main())
+          EOF
+
+      - name: Professional Audio Mixing (No Ghosting)
+        run: |
+          python3 <<'EOF'
+          import webvtt, subprocess, os, time
+
+          def run_ffmpeg_smart_log(cmd, desc):
+              print(f"--- {desc} Starting ---")
+              process = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True, encoding='utf-8')
+              last_log = time.time()
+              while True:
+                  line = process.stderr.readline()
+                  if not line and process.poll() is not None: break
+                  if line and (time.time() - last_log > 30):
+                      print(f"[{desc} Progress] {line.strip()}")
+                      last_log = time.time()
+              process.wait()
+              if process.returncode == 0: print(f"--- {desc} Done ---")
+              else: raise Exception(f"{desc} Failed")
+
+          vtt = webvtt.read("vi.vtt")
+          inputs = ["-i", "bg_audio.wav"]
+          filter_parts = []
+          
+          # Tạo filter script để tránh quá tải Shell
+          for i, c in enumerate(vtt):
+              h, m, s = c.start.replace(',', '.').split(':')
+              ms = int(float(h)*3600000 + float(m)*60000 + float(s)*1000) + 500
+              inputs.extend(["-i", f"chunks/c_{i:05d}.mp3"])
+              # [i+1] vì index 0 là bg_audio.wav
+              filter_parts.append(f"[{i+1}:a]adelay={ms}|{ms}[a{i}];")
+          
+          mix_inputs = "".join(f"[a{i}]" for i in range(len(vtt)))
+          filter_script = "".join(filter_parts) + \
+                          f"{mix_inputs}amix=inputs={len(vtt)}:normalize=0,volume=3.0[tts];" + \
+                          "[0:a]volume=0.90[bg];[bg][tts]amix=inputs=2[out_a]"
+          
+          with open("main_audio_filter.txt", "w") as f:
+              f.write(filter_script)
+
+          # Gọi FFmpeg 1 lần duy nhất bằng list để tránh giới hạn shell
+          cmd = ["ffmpeg", "-y"] + inputs + ["-filter_complex_script", "main_audio_filter.txt", "-map", "[out_a]", "-c:a", "aac", "-b:a", "96k", "final_audio.aac"]
+          run_ffmpeg_smart_log(cmd, "Final Audio Mixing")
+          EOF
+
+      - name: Render Video Hardsub (Perfect 5s)
+        run: |
+          ffmpeg -y -i raw_video.mp4 -i final_audio.aac \
+            -vf "subtitles=vi.vtt:fontsdir=fonts:force_style='FontName=UVN Hong Ha Hep,PrimaryColour=&H00FFFF&,FontSize=30,Outline=0.4,Shadow=0.4'" \
+            -map 0:v -map 1:a \
+            -c:v libx264 -crf 23 -preset medium -r 24 \
+            -x264-params "keyint=120:min-keyint=120:scenecut=0" \
+            -pix_fmt yuv420p -maxrate 2000k -bufsize 3000k \
+            -c:a copy -threads 0 final.mp4
+
+      - name: Generate HLS
+        run: |
+          mkdir -p output
+          ffmpeg -i final.mp4 -c copy -f hls \
+            -hls_time 5 -hls_list_size 0 -start_number 10001 -hls_playlist_type vod \
+            -hls_segment_type fmp4 \
+            -hls_fmp4_init_filename "${{ github.event.inputs.slug }}-index.png" \
+            -hls_segment_filename "output/${{ github.event.inputs.slug }}-index%d.png" \
+            "output/${{ github.event.inputs.slug }}.m3u8"
+          cp vi.vtt output/
+
+      - name: Deploy to Cloudflare Pages (first)
+        id: deploy1
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ github.event.inputs.token }}
+          accountId: ${{ github.event.inputs.account }}
+          projectName: ${{ github.event.inputs.page }}
+          directory: ./output
+          branch: ${{ github.event.inputs.slug }}
+
+      - name: Verify Cloudflare deployment
+        id: verify
+        continue-on-error: true
+        env:
+          PROJECT: ${{ github.event.inputs.page }}
+          BRANCH: ${{ github.event.inputs.slug }}
+        run: |
+          set -e
+          BASE_URL="https://${BRANCH}.${PROJECT}.pages.dev"
+          FILE_URL="${BASE_URL}/${BRANCH}.m3u8"
+          check () {
+            code=$(curl -L -o /dev/null -s -w "%{http_code}" "$FILE_URL")
+            [ "$code" = "200" ]
+          }
+          sleep 60
+          check || (sleep 180 && check) || (echo "NEED_REDEPLOY=true" >> $GITHUB_ENV && exit 1)
+
+      - name: Deploy to Cloudflare Pages 2
+        if: env.NEED_REDEPLOY == 'true'
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ github.event.inputs.token }}
+          accountId: ${{ github.event.inputs.account }}
+          projectName: ${{ github.event.inputs.page }}
+          directory: ./output
+          branch: ${{ github.event.inputs.slug }}
