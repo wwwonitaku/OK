@@ -1,4 +1,4 @@
-name: M3U8 -> Audio (Concat Demuxer Fix)
+name: M3U8 -> Audio (AHiHi Style Mix)
 
 on:
   workflow_dispatch:
@@ -26,12 +26,16 @@ jobs:
 
       - name: Download Video & Subtitle
         run: |
+          # Tải video gốc (copy stream, không encode)
           yt-dlp \
             --hls-prefer-native \
             --concurrent-fragments 5 \
+            --retries infinite \
+            --fragment-retries infinite \
             -o "raw_video.mp4" \
             "${{ github.event.inputs.link }}"
           
+          # Tải phụ đề Việt
           curl -L "https://vicdn.cc/vtt/${{ github.event.inputs.slug }}-vi.vtt" -o vi.vtt
 
       - name: AI TTS Generation
@@ -42,11 +46,13 @@ jobs:
           async def generate_tts(text, out, idx, semaphore):
               async with semaphore:
                   try:
-                      t = re.sub(r'\s+', ' ', text).strip()
-                      if not t: t = "."
+                      # Chuẩn hóa văn bản giống AHiHi
+                      t = re.sub(r'\s+', ' ', text).strip().lower()
+                      if not t: t = "..."
                       tts = edge_tts.Communicate(t, voice="vi-VN-HoaiMyNeural", rate="+28%")
                       await tts.save(out)
                   except:
+                      # File lặng để tránh lỗi tiến trình
                       subprocess.run(["ffmpeg","-y","-f","lavfi","-i","anullsrc=r=24000:cl=mono","-t","0.1",out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
           async def main():
@@ -60,50 +66,52 @@ jobs:
           asyncio.run(main())
           EOF
 
-      - name: Professional TTS Assembly (No Limit Fix)
+      - name: Professional Audio Assembly (Concat Method + 500ms Delay)
         run: |
           python3 <<'EOF'
           import webvtt, subprocess, os
 
           def get_duration(file):
-              cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file]
-              return float(subprocess.check_output(cmd).decode().strip())
+              try:
+                  cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file]
+                  return float(subprocess.check_output(cmd).decode().strip())
+              except: return 0.0
 
           vtt = webvtt.read("vi.vtt")
           os.makedirs("silence", exist_ok=True)
           
+          # Logic: Sub xuất hiện -> 0.5s sau mới có tiếng (giống AHiHi)
+          offset = 0.5 
+          
           with open("concat_list.txt", "w") as f:
               current_time = 0.0
-              
               for i, c in enumerate(vtt):
                   h, m, s = c.start.replace(',', '.').split(':')
-                  start_time = float(h)*3600 + float(m)*60 + float(s)
+                  # Thời điểm sub xuất hiện + offset 0.5s
+                  start_time = float(h)*3600 + float(m)*60 + float(s) + offset
                   
                   audio_file = f"chunks/c_{i:05d}.mp3"
-                  if not os.path.exists(audio_file): continue
-                  
-                  # Tính khoảng trống cần chèn im lặng
-                  gap = start_time - current_time
-                  if gap > 0:
-                      silence_file = f"silence/s_{i}.mp3"
-                      # Tạo file im lặng đúng thời lượng gap
-                      subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"anullsrc=r=44100:cl=stereo", "-t", str(gap), silence_file], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                      f.write(f"file '{silence_file}'\n")
-                  
-                  f.write(f"file '{audio_file}'\n")
-                  duration = get_duration(audio_file)
-                  current_time = start_time + duration
+                  if os.path.exists(audio_file):
+                      # Tính toán khoảng im lặng cần chèn
+                      gap = start_time - current_time
+                      if gap > 0:
+                          silence_file = f"silence/s_{i}.mp3"
+                          subprocess.run(["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", str(gap), silence_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                          f.write(f"file '{silence_file}'\n")
+                      
+                      f.write(f"file '{audio_file}'\n")
+                      current_time = start_time + get_duration(audio_file)
 
-          # Nối tất cả lại thành 1 file TTS duy nhất (Cực nhanh và không giới hạn số lượng)
+          # Nối toàn bộ thành dải TTS (đã có khoảng lặng khớp timeline)
           subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", "concat_list.txt", "-c", "copy", "all_tts.mp3"], check=True)
           EOF
 
       - name: Final Remux (Overlay TTS on Video)
         run: |
-          # Mix âm thanh gốc của phim với tts (all_tts.mp3)
-          # Tăng volume lớp TTS (2.5) để nghe rõ lời thoại
+          # Mix TTS to (3.0) và hạ nhạc nền phim xuống (0.85) để nghe rõ lời thoại
+          # Giữ nguyên video gốc (-c:v copy)
           ffmpeg -y -i raw_video.mp4 -i all_tts.mp3 \
-            -filter_complex "[0:a][1:a]amix=inputs=2:duration=first:dropout_transition=0,volume=2.5[out_a]" \
+            -filter_complex "[0:a]volume=0.85[bg];[1:a]volume=3.0[tts];[bg][tts]amix=inputs=2:duration=first:dropout_transition=0[out_a]" \
             -map 0:v:0 -map "[out_a]" \
             -c:v copy -c:a aac -b:a 128k -shortest final.mp4
 
