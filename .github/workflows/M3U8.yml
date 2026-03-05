@@ -31,7 +31,20 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg
           python3 -m pip install -U yt-dlp
+
+      - name: Get Duration From m3u8
+        id: duration
+        run: |
+          URL="${{ github.event.inputs.link }}"
           
+          echo "Getting duration from m3u8..."
+          META=$(yt-dlp --dump-json "$URL")
+          
+          EXPECTED=$(echo "$META" | jq '.duration')
+          
+          echo "Expected duration: $EXPECTED seconds"
+          echo "expected=$EXPECTED" >> $GITHUB_OUTPUT
+      
       - name: Download Video from m3u8 Link
         run: |
           yt-dlp \
@@ -42,22 +55,48 @@ jobs:
             --abort-on-unavailable-fragment \
             -o "input_video.mp4" \
             "${{ github.event.inputs.link }}"
+      
       - name: Verify Video Integrity
         run: |
-            if [ -f "input_video.mp4" ]; then
-              echo "Checking video for errors..."
-              # Lệnh này sẽ quét toàn bộ file và báo lỗi nếu có frame hỏng hoặc thiếu
-              if ffmpeg -v error -i input_video.mp4 -f null - 2>error.log; then
-                echo "Video is healthy."
-              else
-                echo "Video contains errors!"
-                cat error.log
-                exit 1 # Làm cho Workflow thất bại để bạn biết mà chạy lại
-              fi
+          if [ -f "input_video.mp4" ]; then
+            echo "Checking video for errors..."
+            if ffmpeg -v error -i input_video.mp4 -f null - 2>error.log; then
+              echo "Video is healthy."
             else
-              echo "File not found!"
+              echo "Video contains errors!"
+              cat error.log
               exit 1
-            fi             
+            fi
+          else
+            echo "File not found!"
+            exit 1
+          fi
+      
+      - name: Compare Duration
+        run: |
+          EXPECTED=${{ steps.duration.outputs.expected }}
+      
+          echo "Getting duration from downloaded file..."
+          ACTUAL=$(ffprobe -v error \
+            -show_entries format=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            input_video.mp4)
+      
+          ACTUAL=${ACTUAL%.*}
+      
+          echo "Expected: $EXPECTED"
+          echo "Actual: $ACTUAL"
+      
+          DIFF=$(echo "$EXPECTED $ACTUAL" | awk '{print ($1>$2)?$1-$2:$2-$1}')
+      
+          echo "Difference: $DIFF seconds"
+      
+          if [ "$DIFF" -gt 3 ]; then
+            echo "Duration mismatch!"
+            exit 1
+          else
+            echo "Duration OK"
+          fi   
       - name: Convert to HLS fMP4 (Segments as PNG)
         run: |
           mkdir -p output
