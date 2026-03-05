@@ -35,14 +35,29 @@ jobs:
       - name: Download Video from m3u8 Link
         run: |
           yt-dlp \
-            --concurrent-fragments 3 \
+            --concurrent-fragments 2 \
             --retries 3 \
             --fragment-retries 2 \
             --retry-sleep 60 \
             --abort-on-unavailable-fragment \
             -o "input_video.mp4" \
             "${{ github.event.inputs.link }}"
-                  
+      - name: Verify Video Integrity
+        run: |
+            if [ -f "input_video.mp4" ]; then
+              echo "Checking video for errors..."
+              # Lệnh này sẽ quét toàn bộ file và báo lỗi nếu có frame hỏng hoặc thiếu
+              if ffmpeg -v error -i input_video.mp4 -f null - 2>error.log; then
+                echo "Video is healthy."
+              else
+                echo "Video contains errors!"
+                cat error.log
+                exit 1 # Làm cho Workflow thất bại để bạn biết mà chạy lại
+              fi
+            else
+              echo "File not found!"
+              exit 1
+            fi             
       - name: Convert to HLS fMP4 (Segments as PNG)
         run: |
           mkdir -p output
