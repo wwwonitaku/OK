@@ -1,4 +1,4 @@
-name: M3U8 ->> Audio
+name: M3U8 -> Audio (Remux & Fast Mix)
 
 on:
   workflow_dispatch:
@@ -20,15 +20,9 @@ jobs:
       - name: Setup Environment
         run: |
           sudo apt update
-          sudo apt install -y ffmpeg curl jq unzip fontconfig python3 python3-pip
+          sudo apt install -y ffmpeg curl jq unzip python3 python3-pip
           python3 -m pip install --upgrade pip
           python3 -m pip install -U yt-dlp webvtt-py requests edge-tts
-
-      - name: Setup Subtitle Font
-        run: |
-          mkdir -p fonts
-          curl -L https://github.com/wwwonitaku/Linux/raw/main/UVNHongHaHep_B.TTF -o fonts/UVNHongHaHep_B.TTF
-          fc-cache -f fonts
 
       - name: Download Video & Subtitle
         run: |
@@ -41,7 +35,7 @@ jobs:
             "${{ github.event.inputs.link }}"
           
           curl -L "https://vicdn.cc/vtt/${{ github.event.inputs.slug }}-vi.vtt" -o vi.vtt
-          # Trích xuất audio gốc để mix cho nhanh
+          # Trích xuất audio gốc để mix
           ffmpeg -i raw_video.mp4 -vn -ac 2 bg_audio.wav
 
       - name: AI Translate + TTS
@@ -52,21 +46,21 @@ jobs:
           async def generate_tts(text, out, idx, semaphore):
               async with semaphore:
                   try:
-                      t = text.lower()
-                      t = re.sub(r'\s+', ' ', t).strip()
-                      t = t.replace(",", ", ").replace(".", ". ").replace("?", "? ").replace("!", "! ")
-                      if not t.endswith((".", "!", "?", "...")): t += "."
+                      t = re.sub(r'\s+', ' ', text).strip()
+                      if not t: t = "."
+                      # Tốc độ +28% như cũ
                       tts = edge_tts.Communicate(t, voice="vi-VN-HoaiMyNeural", rate="+28%")
                       await tts.save(out)
                       if idx % 100 == 0: print(f"[TTS OK] #{idx:05d}")
                   except:
+                      # Nếu lỗi tạo 0.1s im lặng để giữ sync
                       subprocess.run(["ffmpeg","-y","-f","lavfi","-i","anullsrc=r=24000:cl=mono","-t","0.1",out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
           async def main():
             if not os.path.exists("vi.vtt"): return
             vtt = webvtt.read("vi.vtt")
             os.makedirs("chunks", exist_ok=True)
-            semaphore = asyncio.Semaphore(10)
+            semaphore = asyncio.Semaphore(15)
             tasks = [generate_tts(c.text, f"chunks/c_{i:05d}.mp3", i, semaphore) for i, c in enumerate(vtt)]
             await asyncio.gather(*tasks)
           
@@ -76,56 +70,43 @@ jobs:
       - name: Professional Audio Mixing (No Ghosting)
         run: |
           python3 <<'EOF'
-          import webvtt, subprocess, os, time
-
-          def run_ffmpeg_smart_log(cmd, desc):
-              print(f"--- {desc} Starting ---")
-              process = subprocess.Popen(cmd, stderr=subprocess.PIPE, text=True, encoding='utf-8')
-              last_log = time.time()
-              while True:
-                  line = process.stderr.readline()
-                  if not line and process.poll() is not None: break
-                  if line and (time.time() - last_log > 30):
-                      print(f"[{desc} Progress] {line.strip()}")
-                      last_log = time.time()
-              process.wait()
-              if process.returncode == 0: print(f"--- {desc} Done ---")
-              else: raise Exception(f"{desc} Failed")
+          import webvtt, subprocess, os
 
           vtt = webvtt.read("vi.vtt")
           inputs = ["-i", "bg_audio.wav"]
           filter_parts = []
           
-          # Tạo filter script để tránh quá tải Shell
           for i, c in enumerate(vtt):
               h, m, s = c.start.replace(',', '.').split(':')
-              ms = int(float(h)*3600000 + float(m)*60000 + float(s)*1000) + 500
-              inputs.extend(["-i", f"chunks/c_{i:05d}.mp3"])
-              # [i+1] vì index 0 là bg_audio.wav
-              filter_parts.append(f"[{i+1}:a]adelay={ms}|{ms}[a{i}];")
+              ms = int(float(h)*3600000 + float(m)*60000 + float(s)*1000)
+              
+              audio_file = f"chunks/c_{i:05d}.mp3"
+              if os.path.exists(audio_file):
+                  inputs.extend(["-i", audio_file])
+                  # adelay giúp đặt audio đúng vị trí timestamp mà không bị đè lộn xộn
+                  # index i+1 vì index 0 là bg_audio
+                  filter_parts.append(f"[{len(inputs)-1}:a]adelay={ms}|{ms}[a{i}];")
           
-          mix_inputs = "".join(f"[a{i}]" for i in range(len(vtt)))
-          filter_script = "".join(filter_parts) + \
-                          f"{mix_inputs}amix=inputs={len(vtt)}:normalize=0,volume=3.0[tts];" + \
-                          "[0:a]volume=0.90[bg];[bg][tts]amix=inputs=2[out_a]"
-          
-          with open("main_audio_filter.txt", "w") as f:
-              f.write(filter_script)
+          if filter_parts:
+              mix_inputs = "".join(f"[a{i}]" for i in range(len(filter_parts)))
+              # amix với normalize=0 để giữ nguyên âm lượng TTS không bị nhỏ dần khi nhiều track
+              filter_script = "".join(filter_parts) + \
+                              f"{mix_inputs}amix=inputs={len(filter_parts)}:normalize=0,volume=3.0[tts];" + \
+                              "[0:a]volume=0.85[bg];[bg][tts]amix=inputs=2:duration=first[out_a]"
+              
+              with open("main_audio_filter.txt", "w") as f:
+                  f.write(filter_script)
 
-          # Gọi FFmpeg 1 lần duy nhất bằng list để tránh giới hạn shell
-          cmd = ["ffmpeg", "-y"] + inputs + ["-filter_complex_script", "main_audio_filter.txt", "-map", "[out_a]", "-c:a", "aac", "-b:a", "96k", "final_audio.aac"]
-          run_ffmpeg_smart_log(cmd, "Final Audio Mixing")
+              cmd = ["ffmpeg", "-y"] + inputs + ["-filter_complex_script", "main_audio_filter.txt", "-map", "[out_a]", "-c:a", "aac", "-b:a", "128k", "final_audio.m4a"]
+              subprocess.run(cmd, check=True)
           EOF
 
-      - name: Render Video Hardsub (Perfect 5s)
+      - name: Remux Video (No Hardsub - giữ nguyên gốc)
         run: |
-          ffmpeg -y -i raw_video.mp4 -i final_audio.aac \
-            -vf "subtitles=vi.vtt:fontsdir=fonts:force_style='FontName=UVN Hong Ha Hep,PrimaryColour=&H00FFFF&,FontSize=30,Outline=0.4,Shadow=0.4'" \
-            -map 0:v -map 1:a \
-            -c:v libx264 -crf 23 -preset medium -r 24 \
-            -x264-params "keyint=120:min-keyint=120:scenecut=0" \
-            -pix_fmt yuv420p -maxrate 2000k -bufsize 3000k \
-            -c:a copy -threads 0 final.mp4
+          # Dùng -c:v copy để giữ nguyên stream video gốc, chỉ thay audio. Cực nhanh và nét.
+          ffmpeg -y -i raw_video.mp4 -i final_audio.m4a \
+            -map 0:v:0 -map 1:a:0 \
+            -c:v copy -c:a copy -shortest final.mp4
 
       - name: Generate HLS
         run: |
