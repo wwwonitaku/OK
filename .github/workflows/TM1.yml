@@ -59,7 +59,7 @@ jobs:
                       tts_text = normalize_for_tts(text)
                       if not tts_text or tts_text == ".": 
                           raise Exception("Empty text")
-                      tts = edge_tts.Communicate(tts_text, voice="vi-VN-HoaiMyNeural", rate="+30%")
+                      tts = edge_tts.Communicate(tts_text, voice="vi-VN-HoaiMyNeural", rate="+31%")
                       await tts.save(out)
                   except:
                       # Tạo file lặng nếu lỗi
@@ -92,7 +92,7 @@ jobs:
           with open("audio_filter.txt","w") as f:
               for i,c in enumerate(vtt):
                   h,m,s = c.start.replace(',','.').split(':')
-                  ms = int(float(h)*3600000 + float(m)*60000 + float(s)*1000) + 300
+                  ms = int(float(h)*3600000 + float(m)*60000 + float(s)*1000) + 200
                   f.write(f"[{i+1}:a]adelay={ms}|{ms}[a{i}];")
               
               f.write("".join(f"[a{i}]" for i in range(len(vtt))))
