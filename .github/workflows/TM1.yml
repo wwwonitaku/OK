@@ -138,7 +138,7 @@ jobs:
                   else:
                       max_duration_ms = video_duration_ms - start_ms - 10 if video_duration_ms > 0 else 10000
                   
-                  max_duration_ms = max(500, max_duration_ms)
+                  max_duration_ms = max(1000, max_duration_ms)
                   max_duration_sec = max_duration_ms / 1000.0
                   orig_duration_sec = get_duration(f"chunks/c_{i_global}.mp3")
                   
