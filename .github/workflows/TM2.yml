@@ -145,7 +145,7 @@ jobs:
               f.write(";".join(filters) + ";")
               # FIX LỖI MẤT TIẾNG: amix chia âm lượng cho số lượng input. 
               # Ta nhân ngược lại với số lượng inputs và nhân thêm 3.0 để đạt volume yêu cầu.
-              f.write(f"{mix_labels}amix=inputs={num_tts}:normalize=0,volume={num_tts * 3.0}[tts];")
+              f.write(f"{mix_labels}amix=inputs={num_tts}:normalize=0,volume=3.0[tts];")
               # Nhạc nền volume 0.9 như yêu cầu
               f.write(f"[0:a]volume=0.9[bg];[bg][tts]amix=inputs=2:normalize=0[out_audio]")
           EOF
