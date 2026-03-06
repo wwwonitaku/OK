@@ -101,7 +101,7 @@ jobs:
           import webvtt, os, subprocess
           def to_ms(time_str):
               h, m, s = time_str.replace(',', '.').split(':')
-              return int(float(h)*3600000 + float(m)*60000 + float(s)*1000) + 300
+              return int(float(h)*3600000 + float(m)*60000 + float(s)*1000)
           def get_duration(file):
               cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file]
               return float(subprocess.check_output(cmd))
