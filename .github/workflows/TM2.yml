@@ -118,7 +118,7 @@ jobs:
               
               # CÁCH KHẮC PHỤC 1: Đổi delay từ mili-giây sang Samples (Mẫu)
               # Dùng Sample sẽ cho độ chính xác tuyệt đối ở mức tín hiệu số, không bị cộng dồn sai số float
-              delay_samples = int((start_ms * audio_rate) / 1000)
+              delay_samples = int((start_ms * audio_rate) / 1000) + 300
               
               if i < len(vtt) - 1:
                   next_start_ms = to_ms(vtt[i+1].start)
