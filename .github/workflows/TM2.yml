@@ -92,7 +92,7 @@ jobs:
           VIDEO_DURATION=$(ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 raw_video.mp4)
           AUDIO_RATE=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of default=noprint_wrappers=1:nokey=1 raw_video.mp4)
           # Fallback nếu không đọc được audio rate
-          if[ -z "$AUDIO_RATE" ]; then AUDIO_RATE=44100; fi
+          if [ -z "$AUDIO_RATE" ]; then AUDIO_RATE=44100; fi
           echo "audio_rate=$AUDIO_RATE" >> $GITHUB_ENV
           
           export VIDEO_DURATION=$VIDEO_DURATION
