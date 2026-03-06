@@ -104,7 +104,7 @@ jobs:
           with open("audio_filter.txt","w") as f:
               for i,c in enumerate(vtt):
                   h,m,s = c.start.replace(',','.').split(':')
-                  ms = int(float(h)*3600000 + float(m)*60000 + float(s)*1000) + 200
+                  ms = int(float(h)*3600000 + float(m)*60000 + float(s)*1000) + 300
                   f.write(f"[{i+1}:a]adelay={ms}|{ms}[a{i}];")
               
               f.write("".join(f"[a{i}]" for i in range(len(vtt))))
