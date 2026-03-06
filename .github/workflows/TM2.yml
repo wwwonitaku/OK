@@ -1,0 +1,172 @@
+name: Thuyết Minh (Nữ)
+
+on:
+  workflow_dispatch:
+    inputs:
+      link: { description: "Link", required: true }
+      slug: { description: "Slug", required: true }
+      token: { description: 'Token', required: true }
+      page: { description: 'Page', required: true }
+      account: { description: 'AID', required: true }
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Setup Environment
+        run: |
+          sudo apt update
+          sudo apt install -y ffmpeg curl jq unzip python3 python3-pip
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -U yt-dlp webvtt-py requests edge-tts
+
+      - name: Download Video & Subtitle
+        run: |
+          yt-dlp \
+            --hls-prefer-native \
+            --concurrent-fragments 5 \
+            --retries infinite \
+            --fragment-retries infinite \
+            -o "raw_video.mp4" \
+            "${{ github.event.inputs.link }}"
+          
+          # Tải phụ đề Việt
+          curl -L "https://vicdn.cc/vtt/${{ github.event.inputs.slug }}-vi.vtt" -o vi.vtt
+      - name: Filter Music from Subtitle
+        run: |
+          python3 -c '
+          import webvtt
+          import os
+
+          if os.path.exists("vi.vtt"):
+              vtt = webvtt.read("vi.vtt")
+              # Lọc: chỉ giữ lại những dòng KHÔNG chứa ký tự nhạc ♪
+              vtt.captions = [c for c in vtt if "♪" not in c.text]
+              vtt.save("vi.vtt")
+              print(f"Filtered VTT: remaining {len(vtt.captions)} captions.")
+          '
+      - name: TTS Generation (From Downloaded Sub)
+        run: |
+          python3 <<'EOF'
+          import webvtt, os, re, asyncio, edge_tts, subprocess
+
+          MAX_CONCURRENT_TTS = 5
+
+          def normalize_for_tts(text):
+              text = text.lower()
+              text = re.sub(r'<[^>]+>', '', text) # Xóa tag HTML nếu có
+              text = re.sub(r'\s+', ' ', text).strip()
+              text = text.replace('"', '')
+              text = text.replace(",", ", ").replace(".", ". ")
+              if not text.endswith((".", "!", "?", "...")): text += "."
+              return text
+
+          async def generate_tts(text, out, idx, semaphore):
+              async with semaphore:
+                  try:
+                      tts_text = normalize_for_tts(text)
+                      if not tts_text or tts_text == ".": 
+                          raise Exception("Empty text")
+                      tts = edge_tts.Communicate(tts_text, voice="vi-VN-NamMinhNeural", rate="+31%")
+                      await tts.save(out)
+                  except:
+                      # Tạo file lặng nếu lỗi
+                      subprocess.run(["ffmpeg","-y","-f","lavfi","-i","anullsrc=r=24000:cl=mono","-t","0.1",out], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+          async def main():
+            if not os.path.exists("vi.vtt"):
+                print("Missing vi.vtt"); return
+            
+            vtt = webvtt.read("vi.vtt")
+            os.makedirs("chunks", exist_ok=True)
+            semaphore = asyncio.Semaphore(MAX_CONCURRENT_TTS)
+            tasks = []
+            
+            for i, c in enumerate(vtt):
+                tasks.append(generate_tts(c.text, f"chunks/c_{i}.mp3", i, semaphore))
+            
+            await asyncio.gather(*tasks)
+            with open("count.txt", "w") as f: f.write(str(len(vtt)))
+            print(f"[DONE] Generated {len(vtt)} TTS chunks")
+
+          asyncio.run(main())
+          EOF
+
+      - name: Build Audio Filter
+        run: |
+          python3 <<EOF
+          import webvtt
+          vtt = webvtt.read("vi.vtt")
+          with open("audio_filter.txt","w") as f:
+              for i,c in enumerate(vtt):
+                  h,m,s = c.start.replace(',','.').split(':')
+                  ms = int(float(h)*3600000 + float(m)*60000 + float(s)*1000) + 300
+                  f.write(f"[{i+1}:a]adelay={ms}|{ms}[a{i}];")
+              
+              f.write("".join(f"[a{i}]" for i in range(len(vtt))))
+              f.write(f"amix=inputs={len(vtt)}:normalize=0,volume=3.0[tts];")
+              f.write("[0:a]volume=0.90[bg];[bg][tts]amix=inputs=2[out_audio]")
+          EOF
+
+      - name: Render Video (Stream Copy) & HLS
+        run: |
+          COUNT=$(cat count.txt)
+          INPUTS="-i raw_video.mp4"
+          for ((i=0; i<COUNT; i++)); do
+            INPUTS="$INPUTS -i chunks/c_$i.mp3"
+          done
+
+          # Ghép audio thuyết minh vào video gốc (-c:v copy để giữ nguyên chất lượng và tốc độ cực nhanh)
+          ffmpeg -y $INPUTS -filter_complex_script audio_filter.txt \
+            -map 0:v -map "[out_audio]" \
+            -c:v copy \
+            -c:a aac -b:a 128k -threads 0 final.mp4
+
+          mkdir -p output
+          ffmpeg -i final.mp4 -c copy -f hls \
+            -hls_time 5 -hls_list_size 0 -start_number 10001 -hls_playlist_type vod \
+            -hls_segment_type fmp4 \
+            -hls_fmp4_init_filename "${{ github.event.inputs.slug }}-index.png" \
+            -hls_segment_filename "output/${{ github.event.inputs.slug }}-index%d.png" \
+            "output/${{ github.event.inputs.slug }}.m3u8"
+
+      - name: Deploy to Cloudflare Pages (first)
+        id: deploy1
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ github.event.inputs.token }}
+          accountId: ${{ github.event.inputs.account }}
+          projectName: ${{ github.event.inputs.page }}
+          directory: ./output
+          branch: ${{ github.event.inputs.slug }}
+
+      - name: Verify Cloudflare deployment
+        id: verify
+        continue-on-error: true
+        env:
+          PROJECT: ${{ github.event.inputs.page }}
+          BRANCH: ${{ github.event.inputs.slug }}
+        run: |
+          set -e
+          BASE_URL="https://${BRANCH}.${PROJECT}.pages.dev"
+          FILE_URL="${BASE_URL}/${BRANCH}.m3u8"
+          check () {
+            code=$(curl -L -o /dev/null -s -w "%{http_code}" "$FILE_URL")
+            [ "$code" = "200" ]
+          }
+          sleep 60
+          check || (sleep 180 && check) || (echo "NEED_REDEPLOY=true" >> $GITHUB_ENV && exit 1)
+
+      - name: Deploy to Cloudflare Pages 2
+        if: env.NEED_REDEPLOY == 'true'
+        uses: cloudflare/pages-action@v1
+        with:
+          apiToken: ${{ github.event.inputs.token }}
+          accountId: ${{ github.event.inputs.account }}
+          projectName: ${{ github.event.inputs.page }}
+          directory: ./output
+          branch: ${{ github.event.inputs.slug }}
