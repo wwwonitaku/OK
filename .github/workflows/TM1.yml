@@ -75,6 +75,8 @@ jobs:
             tasks = []
             
             for i, c in enumerate(vtt):
+                if c.text.strip().startswith("♪"):
+                    continue
                 tasks.append(generate_tts(c.text, f"chunks/c_{i}.mp3", i, semaphore))
             
             await asyncio.gather(*tasks)
