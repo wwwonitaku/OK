@@ -52,6 +52,8 @@ jobs:
               text = re.sub(r'<[^>]+>', '', text)
               text = re.sub(r'\s+', ' ', text).strip()
               text = text.replace('"', '')
+              text = text.replace('[', '')
+              text = text.replace(']', '')
               text = text.replace(",", ", ").replace(".", ". ")
               if not text.endswith((".", "!", "?", "...")): text += "."
               return text
