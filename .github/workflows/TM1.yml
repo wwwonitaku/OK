@@ -63,7 +63,7 @@ jobs:
                       tts_text = normalize_for_tts(text)
                       if not tts_text or tts_text == ".":
                           raise Exception("Empty text")
-                      tts = edge_tts.Communicate(tts_text, voice="vi-VN-HoaiMyNeural", rate="+25%")
+                      tts = edge_tts.Communicate(tts_text, voice="vi-VN-HoaiMyNeural", rate="+29%")
                       await tts.save(out)
                       # Trim silence - Quan trọng để không bị lệch timeline
                       tmp_out = out + ".tmp.mp3"
@@ -145,11 +145,6 @@ jobs:
                   orig_duration_sec = get_duration(f"chunks/c_{i_global}.mp3")
                   
                   atempo_str = ""
-                  if orig_duration_sec > max_duration_sec:
-                      speed = orig_duration_sec / max_duration_sec
-                      if speed > 1.2:
-                          speed = 1.2
-                      atempo_str = f"atempo={speed:.6f},"
                   
                   # CÁCH KHẮC PHỤC 2: Thêm async=1 và hậu tố S vào adelay
                   filters.append(
@@ -160,7 +155,7 @@ jobs:
 
               num_in_batch = len(batch_vtt)
               # Dùng code chuẩn của bạn: volume=3.0 cho các mẻ tts
-              filter_str = ";".join(filters) + f";{mix_labels}amix=inputs={num_in_batch}:normalize=0:dropout_transition=0,asetpts=PTS-STARTPTS,volume=3.0[out]"
+              filter_str = ";".join(filters) + f";{mix_labels}amix=inputs={num_in_batch}:normalize=0:dropout_transition=0,asetpts=PTS-STARTPTS,volume=2.5[out]"
 
               with open(f"audio_filter_b{b}.txt", "w") as f:
                   f.write(filter_str)
