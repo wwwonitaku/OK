@@ -61,7 +61,7 @@ jobs:
                       tts_text = normalize_for_tts(text)
                       if not tts_text or tts_text == ".":
                           raise Exception("Empty text")
-                      tts = edge_tts.Communicate(tts_text, voice="vi-VN-HoaiMyNeural", rate="+31%")
+                      tts = edge_tts.Communicate(tts_text, voice="vi-VN-HoaiMyNeural", rate="+28%")
                       await tts.save(out)
                       # Trim silence - Quan trọng để không bị lệch timeline
                       tmp_out = out + ".tmp.mp3"
@@ -145,10 +145,9 @@ jobs:
                   atempo_str = ""
                   if orig_duration_sec > max_duration_sec:
                       speed = orig_duration_sec / max_duration_sec
-                      if speed > 2.0:
-                          atempo_str = f"atempo=2.0,atempo={speed/2.0:.6f},"
-                      else:
-                          atempo_str = f"atempo={speed:.6f},"
+                      if speed > 1.2:
+                          speed = 1.2
+                      atempo_str = f"atempo={speed:.6f},"
                   
                   # CÁCH KHẮC PHỤC 2: Thêm async=1 và hậu tố S vào adelay
                   filters.append(
