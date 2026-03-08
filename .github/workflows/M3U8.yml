@@ -62,13 +62,13 @@ jobs:
 
             echo "Downloading..."
             yt-dlp \
-              --concurrent-fragments 1 \
-              --retries 3 \
-              --fragment-retries 2 \
-              --retry-sleep 60 \
-              --abort-on-unavailable-fragment \
-              -o "input_video.mp4" \
-              "$URL"
+            --concurrent-fragments 1 \
+            --retries infinite \
+            --fragment-retries 50 \
+            --skip-unavailable-fragments \
+            --retry-sleep fragment:10 \
+            -o "input_video.mp4" \
+            "$URL"
 
             if [ ! -f "input_video.mp4" ]; then
               echo "Download failed."
