@@ -1,0 +1,143 @@
+name: Translate VTT
+
+on:
+  workflow_dispatch:
+    inputs:
+      slug:
+        description: "Subtitle slug"
+        required: true
+        type: string
+
+jobs:
+  translate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install packages
+        run: |
+          pip install webvtt-py deep-translator requests
+
+      - name: Translate and Upload
+        env:
+          SLUG: ${{ github.event.inputs.slug }}
+        run: |
+
+          cat > translate.py << 'PYTHON'
+
+          import os
+          import time
+          import requests
+          import webvtt
+
+          from deep_translator import GoogleTranslator
+
+          slug = os.environ["SLUG"]
+
+          SOURCE_URL = f"https://vicdn.cc/vtt/{slug}.vtt"
+
+          output_slug = slug.replace("-en", "-vi")
+          OUTPUT_FILE = f"{output_slug}.vtt"
+
+          UPLOAD_URL = "https://vicdn.cc/sub.php"
+
+          print("Downloading:", SOURCE_URL)
+
+          r = requests.get(SOURCE_URL, timeout=60)
+
+          if r.status_code != 200:
+              raise Exception("Cannot download subtitle")
+
+          with open("input.vtt", "wb") as f:
+              f.write(r.content)
+
+          print("Subtitle downloaded")
+
+          translator = GoogleTranslator(
+              source='auto',
+              target='vi'
+          )
+
+          vtt = webvtt.read("input.vtt")
+
+          captions = list(vtt)
+
+          BATCH_SIZE = 40
+
+          for i in range(0, len(captions), BATCH_SIZE):
+
+              batch = captions[i:i+BATCH_SIZE]
+
+              texts = []
+
+              for cap in batch:
+
+                  text = cap.text.replace("\n", " ").strip()
+
+                  if not text:
+                      text = " "
+
+                  texts.append(text)
+
+              try:
+
+                  translated = translator.translate_batch(texts)
+
+                  for cap, vi in zip(batch, translated):
+                      cap.text = vi
+
+                  print(f"Translated {i} -> {i + len(batch)}")
+
+              except Exception as e:
+
+                  print("Translate error:", e)
+
+              time.sleep(2)
+
+          vtt.save(OUTPUT_FILE)
+
+          print("Saved:", OUTPUT_FILE)
+
+          print("Uploading subtitle...")
+
+          with open(OUTPUT_FILE, "rb") as f:
+
+              files = {
+                  "file": (
+                      OUTPUT_FILE,
+                      f,
+                      "text/vtt"
+                  )
+              }
+
+              data = {
+                  "filename": OUTPUT_FILE
+              }
+
+              upload = requests.post(
+                  UPLOAD_URL,
+                  files=files,
+                  data=data,
+                  timeout=120
+              )
+
+          print("Upload status:", upload.status_code)
+          print(upload.text)
+
+          if upload.status_code != 200:
+              raise Exception("Upload failed")
+
+          print("DONE")
+
+          PYTHON
+
+          python translate.py
