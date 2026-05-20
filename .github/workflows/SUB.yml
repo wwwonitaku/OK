@@ -1,4 +1,4 @@
-name: Translate VTT AI
+name: Translate VTT AI (With Auto Retry)
 
 on:
   workflow_dispatch:
@@ -47,7 +47,6 @@ jobs:
 
           SOURCE_URL = f"https://vicdn.cc/vtt/{slug}.vtt"
           
-          # Tự động xử lý slug đầu ra (Cắt bỏ đuôi -en hoặc -cn rồi đổi thành -vi)
           if "-" in slug:
               base_slug = "-".join(slug.split("-")[:-1])
               output_slug = f"{base_slug}-vi"
@@ -69,22 +68,17 @@ jobs:
 
           print("Tải sub gốc thành công!")
 
-          # Đọc file phụ đề
           vtt = webvtt.read("input.vtt")
           captions = list(vtt)
           total_lines = len(captions)
           print(f"Tổng số dòng cần dịch: {total_lines}")
 
-          # Khởi tạo Gemini Client
           client = genai.Client(api_key=api_key)
-
-          # Kích thước mảng vàng: Giữ ngữ cảnh mượt mà, bảo vệ timeline an toàn tuyệt đối
           BATCH_SIZE = 100 
 
           for i in range(0, total_lines, BATCH_SIZE):
               batch = captions[i:i+BATCH_SIZE]
               
-              # 1. Chuẩn bị đầu vào (Gắn số thứ tự bảo vệ timeline)
               prompt_text = ""
               for idx, cap in enumerate(batch):
                   clean_text = cap.text.replace("\n", " ").strip()
@@ -92,7 +86,6 @@ jobs:
                       clean_text = "..."
                   prompt_text += f"[{idx}] {clean_text}\n"
 
-              # 2. Hệ thống prompt kỷ luật thép dành cho AI dịch phim
               system_instruction = (
                   "You are a professional movie subtitle translator. Translate the text into natural, fluent Vietnamese.\n"
                   "CRITICAL RULES:\n"
@@ -104,19 +97,39 @@ jobs:
 
               print(f"Đang dịch đoạn {i} -> {min(i + BATCH_SIZE, total_lines)}...")
 
-              try:
-                  response = client.models.generate_content(
-                      model='gemini-2.5-flash',
-                      contents=prompt_text,
-                      config=types.GenerateContentConfig(
-                          system_instruction=system_instruction,
-                          temperature=0.3, # Thấp để đảm bảo tính chính xác của cấu trúc dòng
+              # === THUẬT TOÁN TỰ ĐỘNG THỬ LẠI KHI BỊ LỖI 503 / VƯỢT QUÁ QUOTA ===
+              max_retries = 5
+              retry_delay = 6  # Bắt đầu ngủ từ 6 giây
+              success = False
+              response_text = ""
+
+              for attempt in range(max_retries):
+                  try:
+                      response = client.models.generate_content(
+                          model='gemini-2.5-flash',
+                          contents=prompt_text,
+                          config=types.GenerateContentConfig(
+                              system_instruction=system_instruction,
+                              temperature=0.3,
+                          )
                       )
-                  )
-                  
-                  translated_lines = response.text.strip().split('\n')
-                  
-                  # 3. Phân tách kết quả trả về từ AI đưa vào từ điển tra cứu nhanh
+                      response_text = response.text
+                      success = True
+                      break  # Nếu thành công thì thoát vòng lặp thử lại ngay lập tức
+                  except Exception as e:
+                      error_str = str(e)
+                      # Kiểm tra nếu dính lỗi 503 (bận) hoặc 429 (quá lượt) thì tiến hành ngủ tiếp
+                      if "503" in error_str or "429" in error_str or "UNAVAILABLE" in error_str:
+                          print(f"   [Thử lần {attempt + 1}/{max_retries}] Server Google bận hoặc quá tải. Đang ngủ {retry_delay} giây trước khi thử lại...")
+                          time.sleep(retry_delay)
+                          retry_delay *= 2  # Tăng gấp đôi thời gian chờ cho lần sau (6s -> 12s -> 24s...)
+                      else:
+                          # Lỗi khác (ví dụ lỗi prompt) thì không cần thử lại
+                          print(f"-> Lỗi không thể sửa đổi tại phân đoạn {i}: {e}")
+                          break
+
+              if success:
+                  translated_lines = response_text.strip().split('\n')
                   translated_dict = {}
                   for line in translated_lines:
                       if ']' in line:
@@ -130,40 +143,25 @@ jobs:
                           except:
                               pass
 
-                  # 4. Áp kết quả dịch vào file VTT gốc dựa theo số ID
                   for idx, cap in enumerate(batch):
                       if idx in translated_dict and translated_dict[idx]:
                           cap.text = translated_dict[idx]
                       else:
-                          # Nếu AI bỏ sót dòng này, giữ nguyên text gốc để timeline KHÔNG bị xê dịch
                           print(f"-> Cảnh báo: Dòng số {i + idx} bị lỗi cấu trúc hoặc AI bỏ sót. Giữ nguyên gốc.")
+              else:
+                  print(f"-> [THẤT BẠI HOÀN TOÀN] Không thể dịch đoạn {i} sau {max_retries} lần thử lại. Giữ nguyên gốc tiếng Anh đoạn này.")
 
-              except Exception as e:
-                  print(f"-> Lỗi nghiêm trọng tại phân đoạn {i}: {e}")
-                  print("Hệ thống sẽ bỏ qua đoạn lỗi này để dịch tiếp các đoạn sau...")
-              
-              # Nghỉ 3 giây để an toàn tuyệt đối với giới hạn Request Per Minute (RPM)
+              # Thời gian giãn cách cơ bản giữa các batch
               time.sleep(3)
 
-          # Sau khi dịch xong toàn bộ, lưu lại thành file VTT mới
           vtt.save(OUTPUT_FILE)
           print(f"Đã biên dịch xong thành file mới: {OUTPUT_FILE}")
 
-          # 5. Tiến hành Upload (Gửi POST Request lên Server giống file cũ của bạn)
           print("Đang tiến hành upload file lên server...")
           with open(OUTPUT_FILE, "rb") as f:
-              files = {
-                  "file": (OUTPUT_FILE, f, "text/vtt")
-              }
-              data = {
-                  "filename": OUTPUT_FILE
-              }
-              upload = requests.post(
-                  UPLOAD_URL,
-                  files=files,
-                  data=data,
-                  timeout=120
-              )
+              files = {"file": (OUTPUT_FILE, f, "text/vtt")}
+              data = {"filename": OUTPUT_FILE}
+              upload = requests.post(UPLOAD_URL, files=files, data=data, timeout=120)
 
           print("Trạng thái Upload:", upload.status_code)
           print("Phản hồi từ Server:", upload.text)
@@ -172,6 +170,5 @@ jobs:
               raise Exception("Quá trình Upload lên server thất bại!")
 
           print("=== HOÀN THÀNH ===")
-
           PYTHON
           python translate.py
