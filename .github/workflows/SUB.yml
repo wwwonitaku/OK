@@ -1,20 +1,19 @@
-name: Translate VTT
+name: Translate VTT AI
 
 on:
   workflow_dispatch:
     inputs:
       slug:
-        description: "Subtitle slug"
+        description: "Subtitle slug (e.g., tv-254486-1-6-en or tv-254486-1-6-cn)"
         required: true
         type: string
 
 jobs:
   translate:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 120
 
     steps:
-
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -25,104 +24,140 @@ jobs:
 
       - name: Install packages
         run: |
-          pip install webvtt-py deep-translator requests
+          pip install webvtt-py google-genai requests
 
       - name: Translate and Upload
         env:
           SLUG: ${{ github.event.inputs.slug }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
-
           cat > translate.py << 'PYTHON'
-
           import os
           import time
           import requests
           import webvtt
-
-          from deep_translator import GoogleTranslator
+          from google import genai
+          from google.genai import types
 
           slug = os.environ["SLUG"]
+          api_key = os.environ.get("GEMINI_API_KEY")
+
+          if not api_key:
+              raise Exception("LỖI: Vui lòng cấu hình GEMINI_API_KEY trong GitHub Secrets trước khi chạy!")
 
           SOURCE_URL = f"https://vicdn.cc/vtt/{slug}.vtt"
-
-          output_slug = slug.replace("-en", "-vi")
+          
+          # Tự động xử lý slug đầu ra (Cắt bỏ đuôi -en hoặc -cn rồi đổi thành -vi)
+          if "-" in slug:
+              base_slug = "-".join(slug.split("-")[:-1])
+              output_slug = f"{base_slug}-vi"
+          else:
+              output_slug = f"{slug}-vi"
+              
           OUTPUT_FILE = f"{output_slug}.vtt"
-
           UPLOAD_URL = "https://vicdn.cc/sub.php"
 
-          print("Downloading:", SOURCE_URL)
-
+          print("=== BẮT ĐẦU QUÁ TRÌNH DỊCH PHỤ ĐỀ AI ===")
+          print("Đang tải file từ:", SOURCE_URL)
+          
           r = requests.get(SOURCE_URL, timeout=60)
-
           if r.status_code != 200:
-              raise Exception("Cannot download subtitle")
+              raise Exception(f"Không thể tải file sub gốc. HTTP Status: {r.status_code}")
 
           with open("input.vtt", "wb") as f:
               f.write(r.content)
 
-          print("Subtitle downloaded")
+          print("Tải sub gốc thành công!")
 
-          translator = GoogleTranslator(
-              source='auto',
-              target='vi'
-          )
-
+          # Đọc file phụ đề
           vtt = webvtt.read("input.vtt")
-
           captions = list(vtt)
+          total_lines = len(captions)
+          print(f"Tổng số dòng cần dịch: {total_lines}")
 
-          BATCH_SIZE = 40
+          # Khởi tạo Gemini Client
+          client = genai.Client(api_key=api_key)
 
-          for i in range(0, len(captions), BATCH_SIZE):
+          # Kích thước mảng vàng: Giữ ngữ cảnh mượt mà, bảo vệ timeline an toàn tuyệt đối
+          BATCH_SIZE = 100 
 
+          for i in range(0, total_lines, BATCH_SIZE):
               batch = captions[i:i+BATCH_SIZE]
+              
+              # 1. Chuẩn bị đầu vào (Gắn số thứ tự bảo vệ timeline)
+              prompt_text = ""
+              for idx, cap in enumerate(batch):
+                  clean_text = cap.text.replace("\n", " ").strip()
+                  if not clean_text:
+                      clean_text = "..."
+                  prompt_text += f"[{idx}] {clean_text}\n"
 
-              texts = []
+              # 2. Hệ thống prompt kỷ luật thép dành cho AI dịch phim
+              system_instruction = (
+                  "You are a professional movie subtitle translator. Translate the text into natural, fluent Vietnamese.\n"
+                  "CRITICAL RULES:\n"
+                  "1. Maintain the exact same line identifiers like [0], [1], [2], etc. Do not merge, skip, or group any lines.\n"
+                  "2. If a line is empty or just '...', output the identifier with '...'.\n"
+                  "3. Translate naturally based on the surrounding context (character relationships, movie tone).\n"
+                  "4. Output ONLY the translated numbered lines. No markdown, no notes, no extra text."
+              )
 
-              for cap in batch:
-
-                  text = cap.text.replace("\n", " ").strip()
-
-                  if not text:
-                      text = " "
-
-                  texts.append(text)
+              print(f"Đang dịch đoạn {i} -> {min(i + BATCH_SIZE, total_lines)}...")
 
               try:
+                  response = client.models.generate_content(
+                      model='gemini-2.5-flash',
+                      contents=prompt_text,
+                      config=types.GenerateContentConfig(
+                          system_instruction=system_instruction,
+                          temperature=0.3, # Thấp để đảm bảo tính chính xác của cấu trúc dòng
+                      )
+                  )
+                  
+                  translated_lines = response.text.strip().split('\n')
+                  
+                  # 3. Phân tách kết quả trả về từ AI đưa vào từ điển tra cứu nhanh
+                  translated_dict = {}
+                  for line in translated_lines:
+                      if ']' in line:
+                          try:
+                              parts = line.split(']', 1)
+                              idx_str = parts[0].replace('[', '').strip()
+                              val = parts[1].strip()
+                              if val == "...":
+                                  val = ""
+                              translated_dict[int(idx_str)] = val
+                          except:
+                              pass
 
-                  translated = translator.translate_batch(texts)
-
-                  for cap, vi in zip(batch, translated):
-                      cap.text = vi
-
-                  print(f"Translated {i} -> {i + len(batch)}")
+                  # 4. Áp kết quả dịch vào file VTT gốc dựa theo số ID
+                  for idx, cap in enumerate(batch):
+                      if idx in translated_dict and translated_dict[idx]:
+                          cap.text = translated_dict[idx]
+                      else:
+                          # Nếu AI bỏ sót dòng này, giữ nguyên text gốc để timeline KHÔNG bị xê dịch
+                          print(f"-> Cảnh báo: Dòng số {i + idx} bị lỗi cấu trúc hoặc AI bỏ sót. Giữ nguyên gốc.")
 
               except Exception as e:
+                  print(f"-> Lỗi nghiêm trọng tại phân đoạn {i}: {e}")
+                  print("Hệ thống sẽ bỏ qua đoạn lỗi này để dịch tiếp các đoạn sau...")
+              
+              # Nghỉ 3 giây để an toàn tuyệt đối với giới hạn Request Per Minute (RPM)
+              time.sleep(3)
 
-                  print("Translate error:", e)
-
-              time.sleep(2)
-
+          # Sau khi dịch xong toàn bộ, lưu lại thành file VTT mới
           vtt.save(OUTPUT_FILE)
+          print(f"Đã biên dịch xong thành file mới: {OUTPUT_FILE}")
 
-          print("Saved:", OUTPUT_FILE)
-
-          print("Uploading subtitle...")
-
+          # 5. Tiến hành Upload (Gửi POST Request lên Server giống file cũ của bạn)
+          print("Đang tiến hành upload file lên server...")
           with open(OUTPUT_FILE, "rb") as f:
-
               files = {
-                  "file": (
-                      OUTPUT_FILE,
-                      f,
-                      "text/vtt"
-                  )
+                  "file": (OUTPUT_FILE, f, "text/vtt")
               }
-
               data = {
                   "filename": OUTPUT_FILE
               }
-
               upload = requests.post(
                   UPLOAD_URL,
                   files=files,
@@ -130,14 +165,13 @@ jobs:
                   timeout=120
               )
 
-          print("Upload status:", upload.status_code)
-          print(upload.text)
+          print("Trạng thái Upload:", upload.status_code)
+          print("Phản hồi từ Server:", upload.text)
 
           if upload.status_code != 200:
-              raise Exception("Upload failed")
+              raise Exception("Quá trình Upload lên server thất bại!")
 
-          print("DONE")
+          print("=== HOÀN THÀNH ===")
 
           PYTHON
-
           python translate.py
