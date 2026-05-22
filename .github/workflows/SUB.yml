@@ -29,22 +29,32 @@ jobs:
       - name: Translate and Upload
         env:
           SLUG: ${{ github.event.inputs.slug }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
         run: |
           cat > translate.py << 'PYTHON'
           import os
           import re
           import time
+          import random
           import requests
           import webvtt
           from google import genai
           from google.genai import types
 
           slug = os.environ["SLUG"]
-          api_key = os.environ.get("GEMINI_API_KEY")
 
-          if not api_key:
-              raise Exception("LỖI: Vui lòng cấu hình GEMINI_API_KEY trong GitHub Secrets trước khi chạy!")
+          # ============================================================
+          # ĐỌC NHIỀU API KEY (mỗi dòng 1 key)
+          # ============================================================
+          raw_keys = os.environ.get("GEMINI_API_KEYS", "")
+          api_keys = [k.strip() for k in raw_keys.strip().splitlines() if k.strip()]
+
+          if not api_keys:
+              raise Exception("LỖI: Vui lòng cấu hình GEMINI_API_KEYS trong GitHub Secrets trước khi chạy!")
+
+          def get_random_client():
+              key = random.choice(api_keys)
+              return genai.Client(api_key=key)
 
           SOURCE_URL = f"https://vicdn.cc/vtt/{slug}.vtt"
 
@@ -126,12 +136,63 @@ jobs:
               return valid
 
           # ============================================================
+          # HÀM PARSE KẾT QUẢ AI
+          # ============================================================
+          def parse_translated(response_text):
+              translated_dict = {}
+              for line in response_text.strip().split('\n'):
+                  if ']' in line:
+                      try:
+                          parts = line.split(']', 1)
+                          idx_str = parts[0].replace('[', '').strip()
+                          val = parts[1].strip()
+                          if val == "...":
+                              val = ""
+                          translated_dict[int(idx_str)] = val
+                      except Exception:
+                          pass
+              return translated_dict
+
+          # ============================================================
+          # HÀM GỌI API VỚI RETRY (có rotate key)
+          # ============================================================
+          def call_api_with_retry(prompt_text, system_instruction, max_retries=10):
+              for attempt in range(max_retries):
+                  wait = 6 * (2 ** attempt)
+                  client = get_random_client()
+                  log(f">> GỬI API — Lần thử {attempt + 1}/{max_retries} | Key #{api_keys.index(client._api_key) + 1 if hasattr(client, '_api_key') else '?'} | {time.strftime('%H:%M:%S')}")
+                  try:
+                      t_start = time.time()
+                      response = client.models.generate_content(
+                          model='gemini-2.5-flash',
+                          contents=prompt_text,
+                          config=types.GenerateContentConfig(
+                              system_instruction=system_instruction,
+                              temperature=0.3,
+                          )
+                      )
+                      elapsed = time.time() - t_start
+                      log(f"<< NHẬN KẾT QUẢ — Thành công sau {elapsed:.1f}s")
+                      return response.text
+                  except Exception as e:
+                      error_str = str(e)
+                      log(f"<< LỖI API: {error_str}")
+                      if "503" in error_str or "429" in error_str or "UNAVAILABLE" in error_str or "500" in error_str:
+                          log(f"   Server bận/quá tải/limit. Đổi key và chờ {wait}s...")
+                          time.sleep(wait)
+                      else:
+                          log(f"   Lỗi không thể retry. Dừng thử lại.")
+                          break
+              return None
+
+          # ============================================================
           # BẮT ĐẦU CHÍNH
           # ============================================================
           log_section("BẮT ĐẦU QUÁ TRÌNH DỊCH PHỤ ĐỀ AI")
           log(f"Slug       : {slug}")
           log(f"Source URL : {SOURCE_URL}")
           log(f"Output file: {OUTPUT_FILE}")
+          log(f"Số API key : {len(api_keys)}")
 
           r = requests.get(SOURCE_URL, timeout=60)
           if r.status_code != 200:
@@ -148,11 +209,20 @@ jobs:
           captions = preprocess_captions(captions)
           total_lines = len(captions)
 
-          client = genai.Client(api_key=api_key)
           BATCH_SIZE = 100
           total_batches = (total_lines + BATCH_SIZE - 1) // BATCH_SIZE
 
           log_section(f"BẮT ĐẦU DỊCH — {total_lines} dòng / {total_batches} batch")
+
+          system_instruction = (
+              "You are a professional movie subtitle translator. Translate the text into natural, fluent Vietnamese.\n"
+              "CRITICAL RULES:\n"
+              "1. You MUST output EVERY line with its exact index. Never skip any index.\n"
+              "2. Maintain the exact same line identifiers like [0], [1], [2], etc. Do not merge, skip, or group any lines.\n"
+              "3. If a line is empty or just '...', output the identifier with '...'.\n"
+              "4. Translate naturally based on the surrounding context (character relationships, movie tone).\n"
+              "5. Output ONLY the translated numbered lines. No markdown, no notes, no extra text."
+          )
 
           for i in range(0, total_lines, BATCH_SIZE):
               batch = captions[i:i + BATCH_SIZE]
@@ -164,6 +234,7 @@ jobs:
               log(f"[BATCH {batch_num}/{total_batches}] Dòng {line_start}–{line_end} ({len(batch)} dòng)")
               log_separator("-")
 
+              # Build prompt
               prompt_text = ""
               for idx, cap in enumerate(batch):
                   clean_text = cap.text.replace("\n", " ").strip()
@@ -171,80 +242,44 @@ jobs:
                       clean_text = "..."
                   prompt_text += f"[{idx}] {clean_text}\n"
 
-              # Log nội dung gửi đi
               log(">> NỘI DUNG GỬI LÊN API:")
               for line in prompt_text.strip().split('\n'):
                   log(f"   {line}")
 
-              system_instruction = (
-                  "You are a professional movie subtitle translator. Translate the text into natural, fluent Vietnamese.\n"
-                  "CRITICAL RULES:\n"
-                  "1. Maintain the exact same line identifiers like [0], [1], [2], etc. Do not merge, skip, or group any lines.\n"
-                  "2. If a line is empty or just '...', output the identifier with '...'.\n"
-                  "3. Translate naturally based on the surrounding context (character relationships, movie tone).\n"
-                  "4. Output ONLY the translated numbered lines. No markdown, no notes, no extra text."
-              )
+              # Lần thử đầu
+              response_text = call_api_with_retry(prompt_text, system_instruction)
+              if response_text is None:
+                  raise Exception(f"[THẤT BẠI] Không thể dịch batch {batch_num} sau nhiều lần thử.")
 
-              MAX_RETRIES = 10
-              success = False
-              response_text = ""
-
-              for attempt in range(MAX_RETRIES):
-                  wait = 6 * (2 ** attempt)
-                  log(f">> GỬI API — Lần thử {attempt + 1}/{MAX_RETRIES} | {time.strftime('%H:%M:%S')}")
-                  try:
-                      t_start = time.time()
-                      response = client.models.generate_content(
-                          model='gemini-2.5-flash',
-                          contents=prompt_text,
-                          config=types.GenerateContentConfig(
-                              system_instruction=system_instruction,
-                              temperature=0.3,
-                          )
-                      )
-                      elapsed = time.time() - t_start
-                      response_text = response.text
-                      log(f"<< NHẬN KẾT QUẢ — Thành công sau {elapsed:.1f}s")
-                      success = True
-                      break
-                  except Exception as e:
-                      error_str = str(e)
-                      log(f"<< LỖI API: {error_str}")
-                      if "503" in error_str or "429" in error_str or "UNAVAILABLE" in error_str:
-                          log(f"   Server bận/quá tải. Chờ {wait}s trước lần thử tiếp theo...")
-                          time.sleep(wait)
-                      else:
-                          log(f"   Lỗi không thể retry. Dừng thử lại batch này.")
-                          break
-
-              if not success:
-                  raise Exception(
-                      f"[THẤT BẠI] Không thể dịch batch {batch_num} (dòng {line_start}–{line_end}) "
-                      f"sau {MAX_RETRIES} lần thử. Dừng workflow."
-                  )
-
-              # Log kết quả thô từ AI
               log(">> KẾT QUẢ DỊCH TỪ AI:")
               for line in response_text.strip().split('\n'):
                   log(f"   {line}")
 
-              # Parse kết quả
-              translated_lines = response_text.strip().split('\n')
-              translated_dict = {}
-              for line in translated_lines:
-                  if ']' in line:
-                      try:
-                          parts = line.split(']', 1)
-                          idx_str = parts[0].replace('[', '').strip()
-                          val = parts[1].strip()
-                          if val == "...":
-                              val = ""
-                          translated_dict[int(idx_str)] = val
-                      except Exception:
-                          pass
+              translated_dict = parse_translated(response_text)
 
-              # Ghi kết quả vào caption
+              # Kiểm tra xem có dòng nào bị thiếu không
+              missing_indices = [idx for idx in range(len(batch)) if idx not in translated_dict or not translated_dict.get(idx)]
+              if missing_indices:
+                  log(f">> CẢNH BÁO: AI bỏ sót {len(missing_indices)} dòng: {missing_indices}. Retry với prompt nhắc rõ hơn...")
+
+                  # Tạo prompt retry chỉ cho các dòng bị thiếu
+                  retry_prompt = f"You missed some lines in your previous translation. Please translate ONLY these missing lines:\n\n"
+                  for idx in missing_indices:
+                      clean_text = batch[idx].text.replace("\n", " ").strip() or "..."
+                      retry_prompt += f"[{idx}] {clean_text}\n"
+                  retry_prompt += f"\nOutput ONLY the missing lines with their exact [index] prefix."
+
+                  retry_response = call_api_with_retry(retry_prompt, system_instruction)
+                  if retry_response:
+                      log(">> KẾT QUẢ RETRY:")
+                      for line in retry_response.strip().split('\n'):
+                          log(f"   {line}")
+                      retry_dict = parse_translated(retry_response)
+                      translated_dict.update(retry_dict)
+
+              # Mapping kết quả vào caption
               log(">> MAPPING KẾT QUẢ VÀO TIMELINE:")
+              fallback_count = 0
               for idx, cap in enumerate(batch):
                   abs_line = i + idx + 1
                   if idx in translated_dict and translated_dict[idx]:
@@ -252,10 +287,12 @@ jobs:
                       log(f"   [{abs_line:04d}] {cap.text.replace(chr(10), ' ')!r:45s} → {translated_vi.replace(chr(10), ' ')!r}")
                       cap.text = translated_vi
                   else:
-                      raise Exception(
-                          f"[LỖI CẤU TRÚC] AI bỏ sót dòng index {idx} (dòng tuyệt đối {abs_line}) "
-                          f"trong batch {batch_num}. Dừng workflow để tránh xuất sub thiếu."
-                      )
+                      # Fallback: giữ nguyên text gốc, không crash
+                      log(f"   [{abs_line:04d}] ⚠ FALLBACK (giữ nguyên gốc): {cap.text.replace(chr(10), ' ')!r}")
+                      fallback_count += 1
+
+              if fallback_count > 0:
+                  log(f">> ⚠ Batch {batch_num}: {fallback_count} dòng giữ nguyên tiếng Anh do AI bỏ sót.")
 
               log(f"[BATCH {batch_num}/{total_batches}] Hoàn thành ✓")
               log(f"Chờ 3s trước batch tiếp theo...")
