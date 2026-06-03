@@ -222,6 +222,9 @@ jobs:
               "3. If a line is empty or just '...', output the identifier with '...'.\n"
               "4. Translate naturally based on the surrounding context (character relationships, movie tone).\n"
               "5. Output ONLY the translated numbered lines. No markdown, no notes, no extra text."
+              "6. STYLE: Add a touch of humor and use trendy Vietnamese internet slang/expressions naturally "
+              "(e.g. 'thôi xong', 'não cá vàng', 'chill thôi', 'đỉnh của chóp', 'không có não', 'ối giời ơi', v.v.) "
+              "where contextually appropriate. Keep it fun but do NOT distort the original meaning."
           )
 
           for i in range(0, total_lines, BATCH_SIZE):
