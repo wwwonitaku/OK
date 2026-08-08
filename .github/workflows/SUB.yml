@@ -118,6 +118,11 @@ jobs:
               return f"{line1}\n{line2}"
 
           def preprocess_captions(captions):
+              """
+              Lọc bỏ HOÀN TOÀN (kể cả timeline) các dòng chỉ chứa cảm xúc/trống.
+              Trả về danh sách caption hợp lệ để dịch — các dòng bị loại sẽ
+              KHÔNG còn tồn tại trong file VTT đầu ra.
+              """
               valid = []
               removed = 0
               for cap in captions:
@@ -132,7 +137,7 @@ jobs:
                   cleaned = wrap_long_line(cleaned)
                   cap.text = cleaned
                   valid.append(cap)
-              log(f"Tiền xử lý: Đã loại bỏ {removed} dòng chỉ chứa cảm xúc/trống. Còn lại {len(valid)} dòng.")
+              log(f"Tiền xử lý: Đã XÓA HẲN {removed} dòng chỉ chứa cảm xúc/trống (kể cả timeline). Còn lại {len(valid)} dòng.")
               return valid
 
           # ============================================================
@@ -207,6 +212,12 @@ jobs:
           log(f"Tổng số dòng gốc: {len(captions)}")
 
           captions = preprocess_captions(captions)
+
+          # QUAN TRỌNG: gán lại captions hợp lệ vào vtt NGAY TỪ ĐÂY
+          # để các dòng cảm xúc/trống bị loại bỏ vĩnh viễn khỏi file output,
+          # kể cả timeline của chúng — không chỉ là "không dịch" như trước.
+          vtt.captions = captions
+
           total_lines = len(captions)
 
           BATCH_SIZE = 100
@@ -221,10 +232,22 @@ jobs:
               "2. Maintain the exact same line identifiers like [0], [1], [2], etc. Do not merge, skip, or group any lines.\n"
               "3. If a line is empty or just '...', output the identifier with '...'.\n"
               "4. Translate naturally based on the surrounding context (character relationships, movie tone).\n"
-              "5. Output ONLY the translated numbered lines. No markdown, no notes, no extra text."
-              "6. STYLE: Add a touch of humor and use trendy Vietnamese internet slang/expressions naturally "
+              "5. Output ONLY the translated numbered lines. No markdown, no notes, no extra text.\n"
+              "6. STYLE: Add a touch of humor and occasionally use trendy Vietnamese internet slang/expressions "
               "(e.g. 'thôi xong', 'não cá vàng', 'chill thôi', 'đỉnh của chóp', 'không có não', 'ối giời ơi', v.v.) "
-              "where contextually appropriate. Keep it fun but do NOT distort the original meaning."
+              "ONLY where it naturally fits the tone. Use this SPARINGLY — do not force slang into every line, "
+              "and never let it distort the original meaning.\n"
+              "7. PRONOUN SAFETY (VERY IMPORTANT): The source is Korean/Chinese, where family/relationship terms "
+              "(mother, older brother, uncle, etc.) are usually explicit in the dialogue itself. When translating "
+              "to Vietnamese, ALWAYS use the correct relational pronoun based on the clear relationship stated or "
+              "implied (mẹ/con, anh/em, cô/cháu, etc.) — for example, a child speaking to their mother must NEVER "
+              "be translated using 'con' as if the child were referring to themselves as 'con' while addressing "
+              "the mother as something else incorrectly (i.e. don't swap the roles).\n"
+              "8. If the relationship between speaker and listener is AMBIGUOUS or CANNOT be determined from the "
+              "given line alone, DO NOT guess a specific relational pronoun (avoid risking wrong pairs like "
+              "mẹ/con, anh/em, chú/cháu). Instead, rephrase the sentence to be SHORTER and more NEUTRAL — using "
+              "no pronoun, an implied subject, or a generic/neutral phrasing — so the sentence still sounds "
+              "natural in Vietnamese without committing to an incorrect relationship."
           )
 
           for i in range(0, total_lines, BATCH_SIZE):
@@ -300,6 +323,23 @@ jobs:
               log(f"[BATCH {batch_num}/{total_batches}] Hoàn thành ✓")
               log(f"Chờ 3s trước batch tiếp theo...")
               time.sleep(3)
+
+          # ============================================================
+          # CLEANUP CUỐI CÙNG: xóa các caption chỉ có timeline, không có text
+          # ============================================================
+          log_section("CLEANUP CUỐI CÙNG — DỌN CAPTION RỖNG")
+          before_count = len(vtt.captions)
+          cleaned_captions = []
+          removed_empty = 0
+          for cap in vtt.captions:
+              if cap.text and cap.text.strip():
+                  cleaned_captions.append(cap)
+              else:
+                  removed_empty += 1
+                  log(f"   ⚠ Xóa caption rỗng tại timeline {cap.start} --> {cap.end}")
+
+          vtt.captions = cleaned_captions
+          log(f"Đã xóa {removed_empty} caption rỗng (chỉ có timeline, không có text). Còn lại {len(vtt.captions)}/{before_count} dòng.")
 
           log_section("LƯU FILE VÀ UPLOAD")
           vtt.save(OUTPUT_FILE)
