@@ -56,8 +56,6 @@ jobs:
               key = random.choice(api_keys)
               return genai.Client(api_key=key)
 
-          SOURCE_URL = f"https://vicdn.cc/vtt/{slug}.vtt"
-
           if "-" in slug:
               base_slug = "-".join(slug.split("-")[:-1])
               output_slug = f"{base_slug}-vi"
@@ -82,6 +80,45 @@ jobs:
 
           def log(msg):
               print(msg, flush=True)
+
+          # ============================================================
+          # FALLBACK: XÂY DANH SÁCH SLUG NGUỒN THEO THỨ TỰ ƯU TIÊN
+          # Nếu slug kết thúc bằng -kr/-en/-cn, sẽ thử lần lượt từ
+          # ngôn ngữ đó trở đi theo FALLBACK_ORDER. Nếu không nhận diện
+          # được hậu tố, chỉ thử đúng slug gốc.
+          # ============================================================
+          FALLBACK_ORDER = ["kr", "en", "cn"]
+
+          def build_candidate_slugs(original_slug):
+              parts = original_slug.rsplit("-", 1)
+              if len(parts) == 2 and parts[1] in FALLBACK_ORDER:
+                  base = parts[0]
+                  current_lang = parts[1]
+                  start_idx = FALLBACK_ORDER.index(current_lang)
+                  return [f"{base}-{lang}" for lang in FALLBACK_ORDER[start_idx:]]
+              else:
+                  return [original_slug]
+
+          def download_source_vtt(original_slug):
+              candidates = build_candidate_slugs(original_slug)
+              log(f"Thứ tự thử tải sub nguồn: {candidates}")
+
+              for candidate_slug in candidates:
+                  url = f"https://vicdn.cc/vtt/{candidate_slug}.vtt"
+                  log(f">> Đang thử tải: {url}")
+                  try:
+                      resp = requests.get(url, timeout=60)
+                  except Exception as e:
+                      log(f"   ⚠ Lỗi khi tải: {e}")
+                      continue
+
+                  if resp.status_code == 200:
+                      log(f"   ✅ Tải thành công từ: {url}")
+                      return resp, url, candidate_slug
+                  else:
+                      log(f"   ❌ HTTP {resp.status_code} — không có file này, thử nguồn tiếp theo...")
+
+              return None, None, None
 
           # ============================================================
           # HÀM TIỀN XỬ LÝ SUB
@@ -195,13 +232,14 @@ jobs:
           # ============================================================
           log_section("BẮT ĐẦU QUÁ TRÌNH DỊCH PHỤ ĐỀ AI")
           log(f"Slug       : {slug}")
-          log(f"Source URL : {SOURCE_URL}")
           log(f"Output file: {OUTPUT_FILE}")
           log(f"Số API key : {len(api_keys)}")
 
-          r = requests.get(SOURCE_URL, timeout=60)
-          if r.status_code != 200:
-              raise Exception(f"Không thể tải file sub gốc. HTTP Status: {r.status_code}")
+          r, used_url, used_slug = download_source_vtt(slug)
+          if r is None:
+              raise Exception(f"Không thể tải file sub gốc từ bất kỳ nguồn nào trong danh sách fallback ({build_candidate_slugs(slug)}).")
+
+          log(f"Nguồn sub được dùng: {used_url}")
 
           with open("input.vtt", "wb") as f:
               f.write(r.content)
